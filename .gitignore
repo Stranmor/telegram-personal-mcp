@@ -1,0 +1,11 @@
+/target/
+/sessions/
+*.session
+*.session.lock
+*.tdesktop
+tdata/
+.env
+.env.*
+!.env.example
+*.log
+*.tmp

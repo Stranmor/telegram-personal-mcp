@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = ["."]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Stranmor"]
+repository = "https://github.com/Stranmor/telegram-personal-mcp"
+
+[package]
+name = "telegram-personal-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "A bounded Model Context Protocol server for Telegram personal accounts"
+readme = "README.md"
+keywords = ["telegram", "mcp", "mtproto", "ferogram", "tdesktop"]
+categories = ["command-line-utilities", "api-bindings"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+fs2 = "0.4"
+ferogram = { version = "0.6.2", features = ["html", "serde"] }
+schemars = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+strum = { version = "0.26", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1.45", features = ["macros", "rt-multi-thread", "io-std", "io-util", "time", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
