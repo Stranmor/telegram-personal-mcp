@@ -202,8 +202,14 @@ jobs:
             printf '%s\t%s\t%s\n' "${name}" "${digest}" "${size}"
           done | sort > "${expected_assets}"
 
-          releases_json="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
-          matches_json="$(jq --arg tag "${tag}" '[.[][] | select(.tag_name == $tag)]' <<<"${releases_json}")"
+          load_release_matches() {
+            if ! releases_json="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"; then
+              return 1
+            fi
+            matches_json="$(jq --arg tag "${tag}" '[.[][] | select(.tag_name == $tag)]' <<<"${releases_json}")"
+          }
+
+          load_release_matches
           match_count="$(jq 'length' <<<"${matches_json}")"
           if [[ "${match_count}" -gt 1 ]]; then
             echo "multiple releases unexpectedly reference ${tag}"
@@ -212,8 +218,19 @@ jobs:
 
           if [[ "${match_count}" -eq 0 ]]; then
             gh release create "${tag}" --draft --verify-tag --title "${title}" --notes-file "${notes_body}" --repo "${GITHUB_REPOSITORY}"
-            releases_json="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
-            matches_json="$(jq --arg tag "${tag}" '[.[][] | select(.tag_name == $tag)]' <<<"${releases_json}")"
+            # The releases list can lag a successful draft creation briefly.
+            for attempt in {1..10}; do
+              sleep 2
+              if ! load_release_matches; then
+                echo "draft ${tag} readback request failed (${attempt}/10)"
+                continue
+              fi
+              match_count="$(jq 'length' <<<"${matches_json}")"
+              if [[ "${match_count}" -ne 0 ]]; then
+                break
+              fi
+              echo "waiting for draft ${tag} readback (${attempt}/10)"
+            done
           fi
 
           match_count="$(jq 'length' <<<"${matches_json}")"

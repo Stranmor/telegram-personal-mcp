@@ -7,6 +7,13 @@ and releases use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Release publication now retries GitHub's bounded draft readback window before
+  failing closed, covering observed eventual consistency after draft creation.
+- Updated the locked `clap` and `tokio` patch releases while keeping the
+  compatibility-sensitive Ferogram and MCP SDK versions pinned.
+
 ## [0.1.0] - 2026-07-16
 
 This is the first public prerelease. The deterministic fake backend, demo binary,
