@@ -1,0 +1,37 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Moscow
+    open-pull-requests-limit: 5
+    groups:
+      rmcp-sdk:
+        patterns:
+          - rmcp
+          - rmcp-macros
+      cargo-minor-patch:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - rmcp
+          - rmcp-macros
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+      day: monday
+      time: "06:30"
+      timezone: Europe/Moscow
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"

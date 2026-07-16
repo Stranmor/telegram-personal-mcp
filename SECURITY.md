@@ -2,17 +2,18 @@
 
 ## Supported Versions
 
-Until the first stable release is published, security fixes target the latest
-`main` branch. Older commits and untagged snapshots are not maintained as
-separate supported versions.
+Security fixes target the latest `0.1.x` prerelease and the current
+`main` branch. Older tags, commits, and untagged snapshots are not maintained
+as separate supported versions.
 
 ## Report a Vulnerability
 
-Open a private GitHub security advisory when available. Otherwise contact the
-maintainer privately. If no private channel is available, open a minimal public
-issue asking the maintainer to establish one; include no vulnerability details,
-logs, identifiers, proof-of-concept material, or affected private data in that
-issue.
+Use the repository's
+[private vulnerability reporting form](https://github.com/Stranmor/telegram-personal-mcp/security/advisories/new).
+If that GitHub surface is temporarily unavailable, open a minimal public issue
+asking the maintainer to establish a private channel; include no vulnerability
+details, logs, identifiers, proof-of-concept material, or affected private data
+in that issue.
 
 In the private report, include:
 

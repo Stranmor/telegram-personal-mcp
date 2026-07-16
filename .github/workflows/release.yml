@@ -1,0 +1,266 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update
+          rustup default stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Verify tag matches Cargo version
+        shell: bash
+        run: |
+          package_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "telegram-personal-mcp") | .version')"
+          test "v${package_version}" = "${GITHUB_REF_NAME}"
+
+      - name: Verify tag commit belongs to main
+        shell: bash
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Build source package
+        run: cargo package --locked
+
+      - name: Verify CLI version
+        shell: bash
+        run: |
+          reported="$(target/debug/telegram-personal-mcp --version)"
+          test "${reported}" = "telegram-personal-mcp ${GITHUB_REF_NAME#v}"
+
+      - name: Upload source package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-source
+          path: target/package/*.crate
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          host="$(rustc -vV | awk '/^host:/ { print $2 }')"
+          name="telegram-personal-mcp-${GITHUB_REF_NAME}-${host}"
+          mkdir -p "dist/${name}"
+          cp target/release/telegram-personal-mcp "dist/${name}/"
+          cp README.md CHANGELOG.md LICENSE-APACHE LICENSE-MIT "dist/${name}/"
+          "dist/${name}/telegram-personal-mcp" --version
+          (
+            cd dist
+            tar -czf "${name}.tar.gz" "${name}"
+          )
+
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $hostTriple = ((rustc -vV | Select-String '^host:').Line -replace '^host:\s*', '')
+          $name = "telegram-personal-mcp-$env:GITHUB_REF_NAME-$hostTriple"
+          New-Item -ItemType Directory -Path "dist/$name" -Force | Out-Null
+          Copy-Item "target/release/telegram-personal-mcp.exe" "dist/$name/"
+          Copy-Item -Path "README.md", "CHANGELOG.md", "LICENSE-APACHE", "LICENSE-MIT" -Destination "dist/$name/"
+          & "dist/$name/telegram-personal-mcp.exe" --version
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+
+      - name: Upload native archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ runner.os }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub prerelease
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Build checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum -- * > SHA256SUMS
+
+      - name: Publish or resume exact draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          notes_file=".github/releases/${tag}.md"
+          test -f "${notes_file}"
+          title="$(sed -n '1s/^# //p' "${notes_file}")"
+          test -n "${title}"
+          notes_body="${RUNNER_TEMP}/${tag}-notes.md"
+          tail -n +2 "${notes_file}" > "${notes_body}"
+          test -s "${notes_body}"
+
+          mapfile -t source_packages < <(compgen -G 'dist/telegram-personal-mcp-*.crate' || true)
+          mapfile -t unix_archives < <(compgen -G "dist/telegram-personal-mcp-${tag}-*.tar.gz" || true)
+          mapfile -t windows_archives < <(compgen -G "dist/telegram-personal-mcp-${tag}-*.zip" || true)
+          test "${#source_packages[@]}" -eq 1
+          test "${#unix_archives[@]}" -eq 2
+          test "${#windows_archives[@]}" -eq 1
+          assets=("${source_packages[@]}" "${unix_archives[@]}" "${windows_archives[@]}" dist/SHA256SUMS)
+          test "${#assets[@]}" -eq 5
+
+          prerelease=false
+          if [[ "${tag}" == v0.* ]]; then
+            prerelease=true
+          fi
+
+          expected_assets="${RUNNER_TEMP}/${tag}-expected-assets.tsv"
+          actual_assets="${RUNNER_TEMP}/${tag}-actual-assets.tsv"
+          for asset in "${assets[@]}"; do
+            name="$(basename "${asset}")"
+            digest="sha256:$(sha256sum "${asset}" | awk '{print $1}')"
+            size="$(stat -c '%s' "${asset}")"
+            printf '%s\t%s\t%s\n' "${name}" "${digest}" "${size}"
+          done | sort > "${expected_assets}"
+
+          releases_json="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+          matches_json="$(jq --arg tag "${tag}" '[.[][] | select(.tag_name == $tag)]' <<<"${releases_json}")"
+          match_count="$(jq 'length' <<<"${matches_json}")"
+          if [[ "${match_count}" -gt 1 ]]; then
+            echo "multiple releases unexpectedly reference ${tag}"
+            exit 1
+          fi
+
+          if [[ "${match_count}" -eq 0 ]]; then
+            gh release create "${tag}" --draft --verify-tag --title "${title}" --notes-file "${notes_body}" --repo "${GITHUB_REPOSITORY}"
+            releases_json="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+            matches_json="$(jq --arg tag "${tag}" '[.[][] | select(.tag_name == $tag)]' <<<"${releases_json}")"
+          fi
+
+          match_count="$(jq 'length' <<<"${matches_json}")"
+          if [[ "${match_count}" -ne 1 ]]; then
+            echo "expected exactly one release for ${tag}, found ${match_count}"
+            exit 1
+          fi
+
+          release_id="$(jq -r '.[0].id' <<<"${matches_json}")"
+          is_draft="$(jq -r '.[0].draft' <<<"${matches_json}")"
+          if [[ -z "${release_id}" || "${release_id}" == null ]]; then
+            echo "release ${tag} has no usable release id"
+            exit 1
+          fi
+
+          read_actual_assets() {
+            gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+              | jq -r '.[][] | [.name, .digest, (.size | tostring)] | @tsv' \
+              | sort > "${actual_assets}"
+          }
+
+          if [[ "${is_draft}" != true ]]; then
+            existing_title="$(jq -r '.[0].name // ""' <<<"${matches_json}")"
+            existing_prerelease="$(jq -r '.[0].prerelease' <<<"${matches_json}")"
+            existing_body="${RUNNER_TEMP}/${tag}-existing-notes.md"
+            jq -j '.[0].body // ""' <<<"${matches_json}" > "${existing_body}"
+            read_actual_assets
+            if [[ "${existing_title}" != "${title}" || "${existing_prerelease}" != "${prerelease}" ]] \
+              || ! cmp -s "${notes_body}" "${existing_body}" \
+              || ! diff -u "${expected_assets}" "${actual_assets}"; then
+              echo "published release ${tag} differs from this exact workflow payload; refusing to mutate it"
+              exit 1
+            fi
+            echo "published release ${tag} already matches the exact title, notes, and asset manifest"
+            exit 0
+          fi
+
+          gh release upload "${tag}" "${assets[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
+          read_actual_assets
+          diff -u "${expected_assets}" "${actual_assets}"
+
+          publish_payload="${RUNNER_TEMP}/${tag}-publish.json"
+          jq -n \
+            --arg name "${title}" \
+            --rawfile body "${notes_body}" \
+            --argjson prerelease "${prerelease}" \
+            '{name: $name, body: $body, draft: false, prerelease: $prerelease}' \
+            > "${publish_payload}"
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --input "${publish_payload}" \
+            --jq '{tag_name, draft, prerelease, html_url}'

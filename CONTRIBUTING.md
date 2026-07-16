@@ -5,14 +5,19 @@ one MCP client and one Telegram personal-account session. Contributions should
 improve that interface without moving agent reasoning, invented identities, or
 multi-agent routing into the server.
 
+Participation is governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Use the
+repository's issue forms for public bugs and feature requests; report
+vulnerabilities privately through [SECURITY.md](SECURITY.md).
+
 ## Development Setup
 
 Use a current stable Rust toolchain, then run:
 
 ```bash
 cargo fmt --all -- --check
-cargo test --workspace --locked
+cargo test --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo package --locked --no-verify
 ```
 
 The test suite includes a deterministic `FakeTelegramBackend` and an integration
@@ -49,6 +54,8 @@ or changing a tool:
 - add deterministic backend coverage and a real MCP transport assertion when
   the public contract changes;
 - update README tool and limitation documentation.
+- update [CHANGELOG.md](CHANGELOG.md) when a user-visible contract, security
+  boundary, or release surface changes.
 
 Do not claim pagination, idempotency, durable delivery, or durable updates unless
 the implementation and tests prove that exact property. In particular, global

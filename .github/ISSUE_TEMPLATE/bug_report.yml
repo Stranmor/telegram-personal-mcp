@@ -1,0 +1,91 @@
+name: Bug report
+description: Report a reproducible problem in the server, CLI, demo, or local persistence.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please remove credentials, session files, private Telegram content, and local absolute paths before posting.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Include the exact release tag or Git commit.
+      placeholder: "v0.1.0 or a full commit SHA"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Execution mode
+      options:
+        - Demo backend
+        - Real Telegram backend
+        - CLI authentication or session selection
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: operating_system
+    attributes:
+      label: Operating system
+      placeholder: "Ubuntu 24.04, macOS 15, Windows 11"
+    validations:
+      required: true
+
+  - type: input
+    id: mcp_host
+    attributes:
+      label: MCP host and client
+      description: Name and version, or "not applicable" for CLI-only reports.
+      placeholder: "Host name and version"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Keep the smallest sequence that demonstrates the problem.
+      placeholder: |
+        1. Start ...
+        2. Call ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or tool result
+      description: Remove secrets, session paths, message text, private files, and identity-bearing data.
+      render: shell
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Safety checklist
+      options:
+        - label: I removed credentials and private Telegram data.
+          required: true
+        - label: I searched existing issues and the documented scope.
+          required: true

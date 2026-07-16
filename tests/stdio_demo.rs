@@ -103,6 +103,12 @@ async fn binary_demo_mode_serves_mcp_over_real_stdio() -> anyhow::Result<()> {
         .and_then(|value| value.pointer("/data/local_path"))
         .and_then(|value| value.as_str())
         .expect("downloaded path");
+    let downloaded_sha256 = attachment
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/sha256"))
+        .and_then(|value| value.as_str())
+        .expect("downloaded sha256");
     assert!(std::path::Path::new(local_path).is_file());
 
     let mut modified_bytes = std::fs::read(local_path)?;
@@ -138,6 +144,12 @@ async fn binary_demo_mode_serves_mcp_over_real_stdio() -> anyhow::Result<()> {
             .and_then(|value| value.pointer("/data/sha256"))
             .and_then(|value| value.as_str()),
         Some(modified_sha256.as_str())
+    );
+    println!(
+        "demo-proof tools={} message_id=11 downloaded_sha256={} file_reply_sha256={}",
+        tools.len(),
+        downloaded_sha256,
+        modified_sha256
     );
 
     client.cancel().await?;
@@ -178,10 +190,12 @@ async fn binary_does_not_negotiate_unimplemented_2026_07_28_protocol() -> anyhow
     let mut response_line = String::new();
     BufReader::new(stdout).read_line(&mut response_line).await?;
     let response: serde_json::Value = serde_json::from_str(&response_line)?;
-    assert_eq!(
-        response.pointer("/result/protocolVersion").and_then(serde_json::Value::as_str),
-        Some("2025-11-25")
-    );
+    let negotiated = response
+        .pointer("/result/protocolVersion")
+        .and_then(serde_json::Value::as_str)
+        .expect("negotiated protocol version");
+    assert_eq!(negotiated, "2025-11-25");
+    println!("protocol-proof requested=2026-07-28 negotiated={negotiated}");
 
     child.kill().await?;
     child.wait().await?;

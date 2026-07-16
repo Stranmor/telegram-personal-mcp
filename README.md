@@ -1,6 +1,7 @@
 # Telegram Personal MCP
 
 [![CI](https://github.com/Stranmor/telegram-personal-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Stranmor/telegram-personal-mcp/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Stranmor/telegram-personal-mcp?include_prereleases&sort=semver)](https://github.com/Stranmor/telegram-personal-mcp/releases)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 A deterministic MCP server for Telegram personal accounts: find conversations,
@@ -38,6 +39,11 @@ server falls back to `2025-11-25`. All 14 tools have input/output schemas, MCP
 annotations, and a stable structured result envelope after argument
 deserialization.
 
+`v0.1.0` is the first public prerelease. Release evidence is deterministic
+and credential-free: CI verifies the real binary, package, stdio transport, and
+demo/fake workflow, while live Telegram authentication and delivery remain an
+explicit prerelease boundary.
+
 ## Try It Without Telegram
 
 Demo mode runs the real MCP binary against a deterministic local fixture. It
@@ -50,6 +56,15 @@ copy as a reply with an exact SHA-256 binding:
 
 ```bash
 cargo test --test stdio_demo
+```
+
+The test also emits two compact proof lines. The hashes below are stable for
+the checked-in fixture and show both the negotiated protocol and the exact
+downloaded/replied bytes:
+
+```text
+protocol-proof requested=2026-07-28 negotiated=2025-11-25
+demo-proof tools=14 message_id=11 downloaded_sha256=8a9e0a420df39699e56b1cc65a12505d8300394566f3d7be014bc20d62a4901c file_reply_sha256=909a3dbb487550bd8d00c5d769649fe98f0212f0d7b6124f2ff839c4132ae60f
 ```
 
 To explore the same fixture from an MCP host:
@@ -233,6 +248,17 @@ and `api_hash` from the official
 account signup and Desktop `tdata` import are not implemented.
 
 ### 2. Install
+
+Install the current prerelease from its exact Git tag:
+
+```bash
+cargo install --locked \
+  --git https://github.com/Stranmor/telegram-personal-mcp.git \
+  --tag v0.1.0
+```
+
+The project is not published to crates.io. For a source checkout or local
+development:
 
 ```bash
 git clone https://github.com/Stranmor/telegram-personal-mcp.git
@@ -493,8 +519,9 @@ See [SECURITY.md](SECURITY.md) for the trust boundaries and local-data details.
 
 ```bash
 cargo fmt --all -- --check
-cargo test --workspace --locked
+cargo test --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo package --locked --no-verify
 ```
 
 Focused boundary tests include:
@@ -508,6 +535,9 @@ cargo test --test mcp_integration
 The `TelegramBackend` trait keeps the MCP layer testable without live Telegram
 credentials. See [CONTRIBUTING.md](CONTRIBUTING.md) before changing tool schemas,
 send behavior, session selection, or local persistence.
+
+Project resources: [Changelog](CHANGELOG.md) · [Support](SUPPORT.md) ·
+[Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
 ## License
 

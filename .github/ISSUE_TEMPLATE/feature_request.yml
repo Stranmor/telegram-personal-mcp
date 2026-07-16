@@ -1,0 +1,55 @@
+name: Feature request
+description: Propose a useful, bounded capability for the Telegram MCP surface.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Prefer a concrete user workflow over an implementation preference. Do not include private Telegram data.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: What job is currently hard, unsafe, or repetitive?
+    validations:
+      required: true
+
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Proposed workflow
+      description: Describe the smallest useful end-to-end interaction.
+    validations:
+      required: true
+
+  - type: textarea
+    id: mcp_boundary
+    attributes:
+      label: Why it belongs in the MCP server
+      description: Explain the deterministic Telegram semantics the server should own; keep reasoning and human approval host-owned.
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and recovery considerations
+      description: Cover account selection, external sends, files, retries, privacy, and failure recovery where relevant.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and the documented scope.
+          required: true
+        - label: This request does not require embedding an AI agent or multi-agent routing.
+          required: true
