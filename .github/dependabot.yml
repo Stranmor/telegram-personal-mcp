@@ -17,11 +17,26 @@ updates:
         patterns:
           - "*"
         exclude-patterns:
+          - ferogram
           - rmcp
           - rmcp-macros
         update-types:
           - minor
           - patch
+    ignore:
+      # These are deliberate compatibility migrations, not unattended bumps.
+      - dependency-name: ferogram
+        versions:
+          - ">= 0.6.3"
+      - dependency-name: rmcp
+        versions:
+          - ">= 1.8.0"
+      - dependency-name: rmcp-macros
+        versions:
+          - ">= 1.8.0"
+      - dependency-name: sha2
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /
