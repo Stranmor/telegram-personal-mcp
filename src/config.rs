@@ -69,10 +69,11 @@ mod tests {
             api_id: 1,
             api_hash: "test".to_string(),
         };
+        let canonical_temp = std::fs::canonicalize(temp.path()).expect("canonical tempdir");
 
         assert_eq!(
             config.session_candidates().expect("candidates"),
-            vec![temp.path().join("a.session"), temp.path().join("b.session")]
+            vec![canonical_temp.join("a.session"), canonical_temp.join("b.session")]
         );
     }
 }
