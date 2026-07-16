@@ -7,8 +7,17 @@ and releases use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Added a live Codex-driven MCP demo as an asciinema cast, GIF, and H.264 MP4,
+  plus a reproducible renderer that isolates the deterministic `--demo` server
+  from every other configured MCP server.
+
 ### Changed
 
+- Expanded the MCP server instructions so host agents read context before file
+  actions, preserve immutable downloads, hash exact final bytes, bind
+  `approved_sha256`, and verify replies after delivery.
 - Release publication now retries GitHub's bounded draft readback window before
   failing closed, covering observed eventual consistency after draft creation.
 - Updated the locked `clap` and `tokio` patch releases while keeping the

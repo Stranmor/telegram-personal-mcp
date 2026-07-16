@@ -31,6 +31,22 @@ telegram-personal-mcp ---- account-scoped attachment cache
      Telegram
 ```
 
+## Live Codex Demo
+
+[![Codex using Telegram Personal MCP](docs/assets/telegram-personal-mcp-demo.gif)](docs/assets/telegram-personal-mcp-demo.mp4)
+
+This recording runs a real `codex exec` session against
+`telegram-personal-mcp --demo`. The terminal view renders the live Codex event
+stream rather than replaying a prewritten tool transcript: the host agent finds
+the contract message, reads its context, downloads the PDF, creates a writable
+sibling, binds its exact SHA-256, replies to the source message, and verifies the
+reply with another context read.
+
+The deterministic fixture uses no Telegram credentials, network connection, or
+real message delivery. The source [asciinema cast](docs/assets/telegram-personal-mcp-demo.cast)
+and [reproducible renderer](scripts/render_terminal_demo.sh) are included in the
+repository.
+
 The implementation uses the official Rust MCP SDK, pinned to `rmcp 1.7.0`,
 and targets the implemented stable MCP `2025-11-25`. The pin deliberately
 avoids claiming or negotiating MCP `2026-07-28` before that contract is
