@@ -27,10 +27,10 @@ async-trait = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
 fs2 = "0.4"
 ferogram = { version = "0.6.2", features = ["html", "serde"] }
-rmcp = { version = "=1.7.0", features = ["transport-io"] }
+rmcp = { version = "=2.2.0", features = ["transport-io"] }
 # rmcp 1.7.0 and its generated tool code must stay in lockstep. Newer macros
 # reference SDK helpers that do not exist in this pinned protocol generation.
-rmcp-macros = "=1.7.0"
+rmcp-macros = "=2.2.0"
 rpassword = "7"
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
 schemars = "1"
@@ -45,5 +45,5 @@ uuid = { version = "1.24.0", features = ["v4"] }
 zeroize = "1"
 
 [dev-dependencies]
-rmcp = { version = "=1.7.0", features = ["client", "transport-child-process"] }
+rmcp = { version = "=2.2.0", features = ["client", "transport-child-process"] }
 tempfile = "3"
