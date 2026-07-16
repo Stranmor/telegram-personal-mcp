@@ -9,3 +9,9 @@ tdata/
 !.env.example
 *.log
 *.tmp
+*.part
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.outbox/
+/attachments/
