@@ -1,0 +1,60 @@
+schema_version = 1
+project_id = "telegram-personal-mcp-release"
+default_target = "github-release"
+release_id_template = "telegram-personal-mcp-{source_commit}-r{revision}"
+
+[source]
+kind = "git_head"
+
+[targets.github-release]
+continuity = "independent"
+
+[targets.github-release.vars]
+remote = "origin"
+repository = "Stranmor/telegram-personal-mcp"
+workflow = "release.yml"
+
+[build]
+argv = [
+  "./.deploy/release-adapter.sh", "build",
+  "--commit", "{source_commit}",
+  "--release-id", "{release_id}",
+  "--output", "{artifact_dir}/{release_id}.json",
+]
+capture = [
+  { name = "manifest", kind = "absolute_file", under = "{artifact_dir}" },
+  { name = "manifest_sha256", kind = "sha256", file = "{manifest}" },
+  { name = "tag", kind = "text" },
+]
+
+[verify]
+argv = [
+  "./.deploy/release-adapter.sh", "verify",
+  "--commit", "{source_commit}",
+  "--release-id", "{release_id}",
+  "--manifest", "{manifest}",
+  "--manifest-sha256", "{manifest_sha256}",
+  "--tag", "{tag}",
+  "--remote", "{remote}",
+  "--repository", "{repository}",
+  "--workflow", "{workflow}",
+]
+
+[apply]
+argv = [
+  "./.deploy/release-adapter.sh", "apply",
+  "--commit", "{source_commit}",
+  "--release-id", "{release_id}",
+  "--transaction-id", "{transaction_id}",
+  "--manifest", "{manifest}",
+  "--manifest-sha256", "{manifest_sha256}",
+  "--tag", "{tag}",
+  "--remote", "{remote}",
+  "--repository", "{repository}",
+  "--workflow", "{workflow}",
+]
+resume = "same_command"
+success = "applied_and_verified"
+
+[recovery]
+mode = "apply_owned"
