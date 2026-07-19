@@ -9,6 +9,7 @@ worktree = "require_clean"
 
 [targets.github-release]
 continuity = "independent"
+coordination_resources = ["repository:github.com/Stranmor/telegram-personal-mcp"]
 
 [targets.github-release.vars]
 remote = "origin"
