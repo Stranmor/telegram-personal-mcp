@@ -113,7 +113,7 @@ verify_release() {
      and (.workflow_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null \
     || die "manifest does not match deployment binding"
   require_source_head "$commit"
-  local snapshot local_tag remote_tag
+  local snapshot local_tag remote_tag remote_refs
   create_source_snapshot "$commit"
   snapshot="$source_snapshot"
   pushd "$snapshot" >/dev/null
@@ -122,12 +122,15 @@ verify_release() {
   [[ "$(sha256sum ".github/workflows/$workflow" | awk '{print $1}')" == "$(jq -r .workflow_sha256 "$manifest")" ]] || die "release workflow changed"
   popd >/dev/null
   local_tag="$(git rev-parse "refs/tags/$tag^{commit}" 2>/dev/null || true)"
-  [[ -z "$local_tag" || "$local_tag" == "$commit" ]] || die "local tag already points elsewhere"
-  remote_tag="$(git ls-remote "$remote" "refs/tags/$tag^{}" | awk 'NR==1 {print $1}')"
+  [[ -z "$local_tag" || "$local_tag" == "$commit" ]] \
+    || die "local tag $tag already points to $local_tag"
+  remote_refs="$(git ls-remote --tags "$remote" "refs/tags/$tag*")"
+  remote_tag="$(awk -v ref="refs/tags/$tag^{}" '$2 == ref { print $1; exit }' <<<"$remote_refs")"
   if [[ -z "$remote_tag" ]]; then
-    remote_tag="$(git ls-remote "$remote" "refs/tags/$tag" | awk 'NR==1 {print $1}')"
+    remote_tag="$(awk -v ref="refs/tags/$tag" '$2 == ref { print $1; exit }' <<<"$remote_refs")"
   fi
-  [[ -z "$remote_tag" || "$remote_tag" == "$commit" ]] || die "remote tag already points elsewhere"
+  [[ -z "$remote_tag" || "$remote_tag" == "$commit" ]] \
+    || die "remote tag $tag already points to $remote_tag"
 }
 
 apply_release() {
