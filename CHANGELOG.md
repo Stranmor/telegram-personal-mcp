@@ -7,6 +7,8 @@ and releases use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-19
+
 ### Added
 
 - Added a live Codex-driven MCP demo as an asciinema cast, GIF, and H.264 MP4,
@@ -62,5 +64,6 @@ release.
 - The release does not claim general exactly-once delivery or live Telegram E2E
   verification.
 
-[Unreleased]: https://github.com/Stranmor/telegram-personal-mcp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Stranmor/telegram-personal-mcp/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Stranmor/telegram-personal-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Stranmor/telegram-personal-mcp/releases/tag/v0.1.0
