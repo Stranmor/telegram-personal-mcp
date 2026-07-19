@@ -83,7 +83,7 @@ verify_remote_release_prerequisites() {
   remote_main="$(git ls-remote "$remote" "refs/heads/$branch" | awk 'NR == 1 { print $1 }')"
   [[ "$remote_main" == "$commit" ]] \
     || die "source commit $commit is not the published $remote/$branch commit ($remote_main)"
-  local_tag="$(git rev-parse "refs/tags/$tag^{commit}" 2>/dev/null || true)"
+  local_tag="$(git rev-parse --verify "refs/tags/$tag^{commit}" 2>/dev/null || true)"
   [[ -z "$local_tag" || "$local_tag" == "$commit" ]] \
     || die "local tag $tag already points to $local_tag"
   remote_refs="$(git ls-remote --tags "$remote" "refs/tags/$tag*")"
