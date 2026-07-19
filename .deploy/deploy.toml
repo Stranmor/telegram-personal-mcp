@@ -1,10 +1,11 @@
-schema_version = 1
+schema_version = 2
 project_id = "telegram-personal-mcp-release"
 default_target = "github-release"
 release_id_template = "telegram-personal-mcp-{source_commit}-r{revision}"
 
 [source]
 kind = "git_head"
+worktree = "require_clean"
 
 [targets.github-release]
 continuity = "independent"
@@ -13,6 +14,18 @@ continuity = "independent"
 remote = "origin"
 repository = "Stranmor/telegram-personal-mcp"
 workflow = "release.yml"
+branch = "main"
+
+[preflight]
+argv = [
+  "./.deploy/release-adapter.sh", "preflight",
+  "--commit", "{source_commit}",
+  "--release-id", "{release_id}",
+  "--remote", "{remote}",
+  "--repository", "{repository}",
+  "--workflow", "{workflow}",
+  "--branch", "{branch}",
+]
 
 [build]
 argv = [
@@ -38,6 +51,7 @@ argv = [
   "--remote", "{remote}",
   "--repository", "{repository}",
   "--workflow", "{workflow}",
+  "--branch", "{branch}",
 ]
 
 [apply]
@@ -52,6 +66,7 @@ argv = [
   "--remote", "{remote}",
   "--repository", "{repository}",
   "--workflow", "{workflow}",
+  "--branch", "{branch}",
 ]
 resume = "same_command"
 success = "applied_and_verified"
