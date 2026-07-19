@@ -5,7 +5,7 @@ release_id_template = "telegram-personal-mcp-{source_commit}-r{revision}"
 
 [source]
 kind = "git_head"
-worktree = "require_clean"
+worktree = "exclude_uncommitted"
 
 [targets.github-release]
 continuity = "independent"
