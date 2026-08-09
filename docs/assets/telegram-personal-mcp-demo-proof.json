@@ -1,0 +1,31 @@
+{
+  "approval_card_count": 1,
+  "approval_state": "sent",
+  "backend_readback": "confirmed",
+  "canonical_chat_id": "-202",
+  "chat_id": "-202",
+  "context_message": "Release candidate passed all health checks.",
+  "delivery_count": 1,
+  "dialog_canonical_chat_id": "-202",
+  "dialog_chat_ref": "-202",
+  "dialog_scanned_count": 3,
+  "dialog_title": "Project Room",
+  "direct_bypass": "blocked",
+  "fixture": "deterministic_no_credentials",
+  "mcp_calls": [
+    "search_dialogs",
+    "search_messages",
+    "read_context",
+    "prepare_message",
+    "send_prepared",
+    "request_send_approval",
+    "get_send_approval",
+    "read_context"
+  ],
+  "payload_sha256": "fd84a6d628e62bd3138dc08d390e4eb0a24eedabec6c15ab3e1f37c042958872",
+  "proof": "telegram-personal-mcp-agent-workspace-v4",
+  "reply_text": "Start at 18:00 UTC. Roll back immediately if any health check fails.",
+  "source_message": "Production deploy is ready. Should I start now?",
+  "source_message_id": 22,
+  "target_message_id": 100
+}

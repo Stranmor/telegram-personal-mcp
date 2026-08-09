@@ -1,9 +1,12 @@
 use rmcp::{ServiceExt, model::CallToolRequestParams};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use telegram_personal_mcp::{
-    Config, FakeTelegramBackend, McpServer, McpServerSettings, PreparedSendState, SendLedger,
-    TelegramBackend, TelegramClient,
+    ApprovalPolicy, Config, FakeApprovalBot, FakeTelegramBackend, McpServer, McpServerSettings,
+    MutationAction, MutationApprovalState, MutationLedger, PreparedSendState, SendApprovalState,
+    SendLedger, TelegramBackend, TelegramClient,
 };
 
 #[tokio::test]
@@ -32,6 +35,7 @@ async fn prepared_send_deduplicates_after_crash_reopen() -> anyhow::Result<()> {
                 json!({
                     "chat_id": "@alex",
                     "text": "Prepared reply after a simulated crash",
+                    "source": { "kind": "self_originated" },
                     "reply_to_message_id": 11
                 })
                 .as_object()
@@ -123,6 +127,287 @@ async fn prepared_send_deduplicates_after_crash_reopen() -> anyhow::Result<()> {
 
     reopened_client.cancel().await?;
     reopened_server_task.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn approval_worker_recovers_after_target_acceptance_and_process_restart() -> anyhow::Result<()>
+{
+    let backend = Arc::new(FakeTelegramBackend::fixture());
+    let bot = Arc::new(FakeApprovalBot::default());
+    let temp = tempfile::tempdir()?;
+    let state_db_path = temp.path().join("state.sqlite");
+    let settings = McpServerSettings {
+        attachment_cache_dir: temp.path().join("attachments"),
+        max_download_bytes: 1024 * 1024,
+        max_upload_bytes: 1024 * 1024,
+        state_db_path: state_db_path.clone(),
+    };
+    let policy = ApprovalPolicy {
+        approval_chat_id: 700,
+        approval_user_id: 700,
+        ttl_seconds: 3_600,
+        poll_timeout_seconds: 1,
+    };
+
+    let first_server =
+        McpServer::with_approval(backend.clone(), settings.clone(), policy.clone(), bot.clone())
+            .map_err(anyhow::Error::msg)?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move {
+        first_server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = ().serve(client_transport).await?;
+    let prepared = client
+        .call_tool(
+            CallToolRequestParams::new("prepare_message").with_arguments(
+                json!({
+                    "chat_id": "@alex",
+                    "text": "Crash-safe approval send",
+                    "source": { "kind": "self_originated" }
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    let draft_id = prepared
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/draft_id"))
+        .and_then(|value| value.as_str())
+        .expect("draft id")
+        .to_string();
+    let payload_sha256 = prepared
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/payload_sha256"))
+        .and_then(|value| value.as_str())
+        .expect("payload hash")
+        .to_string();
+    let requested = client
+        .call_tool(
+            CallToolRequestParams::new("request_send_approval").with_arguments(
+                json!({
+                    "draft_id": draft_id,
+                    "approved_payload_sha256": payload_sha256
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    let approval_id = requested
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/approval_id"))
+        .and_then(|value| value.as_str())
+        .expect("approval id")
+        .to_string();
+    client.cancel().await?;
+    server_task.await??;
+
+    let ledger = SendLedger::new(state_db_path.clone());
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
+    assert!(ledger.mark_approval_sending(&approval_id, now)?);
+    let prepared_record = ledger.get(&draft_id)?.expect("prepared record");
+    let accepted_message_id = backend
+        .send_text_with_random_id(
+            None,
+            &prepared_record.public.chat_id,
+            &prepared_record.public.text,
+            prepared_record.public.reply_to_message_id,
+            prepared_record.random_id,
+        )
+        .await?;
+    assert_eq!(backend.sent_messages().await.len(), 1);
+    assert_eq!(
+        ledger.get_approval(&approval_id)?.expect("sending approval").state,
+        SendApprovalState::Sending
+    );
+
+    let reopened = McpServer::with_approval(backend.clone(), settings, policy, bot)
+        .map_err(anyhow::Error::msg)?;
+    let worker = reopened.start_approval_worker()?.expect("approval worker");
+    for _ in 0..200 {
+        if ledger.get_approval(&approval_id)?.is_some_and(|approval| {
+            approval.state == SendApprovalState::Sent
+                && approval.target_message_id == Some(accepted_message_id)
+        }) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let recovered = ledger.get_approval(&approval_id)?.expect("recovered approval");
+    assert_eq!(recovered.state, SendApprovalState::Sent);
+    assert_eq!(recovered.target_message_id, Some(accepted_message_id));
+    assert_eq!(backend.sent_messages().await.len(), 1);
+    assert_eq!(ledger.get(&draft_id)?.expect("sent draft").public.state, PreparedSendState::Sent);
+    worker.abort();
+    let _ = worker.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn file_approval_recovers_after_acceptance_without_duplicate_upload_message()
+-> anyhow::Result<()> {
+    let backend = Arc::new(FakeTelegramBackend::fixture());
+    let bot = Arc::new(FakeApprovalBot::default());
+    let temp = tempfile::tempdir()?;
+    let state_db_path = temp.path().join("state.sqlite");
+    let settings = McpServerSettings {
+        attachment_cache_dir: temp.path().join("attachments"),
+        max_download_bytes: 1024 * 1024,
+        max_upload_bytes: 1024 * 1024,
+        state_db_path: state_db_path.clone(),
+    };
+    let policy = ApprovalPolicy {
+        approval_chat_id: 700,
+        approval_user_id: 700,
+        ttl_seconds: 3_600,
+        poll_timeout_seconds: 1,
+    };
+
+    let first_server =
+        McpServer::with_approval(backend.clone(), settings.clone(), policy.clone(), bot.clone())
+            .map_err(anyhow::Error::msg)?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move {
+        first_server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = ().serve(client_transport).await?;
+    let downloaded = client
+        .call_tool(CallToolRequestParams::new("download_attachment").with_arguments(
+            json!({ "chat_id": "@alex", "message_id": 11 }).as_object().expect("object").clone(),
+        ))
+        .await?;
+    let downloaded_path = downloaded
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/local_path"))
+        .and_then(|value| value.as_str())
+        .expect("download path");
+    let file_path = std::path::Path::new(downloaded_path)
+        .parent()
+        .expect("download directory")
+        .join("crash-safe-file.txt");
+    let bytes = b"accepted before process crash\n";
+    std::fs::write(&file_path, bytes)?;
+    let sha256 = format!("{:x}", Sha256::digest(bytes));
+    let prepared = client
+        .call_tool(
+            CallToolRequestParams::new("prepare_file_message").with_arguments(
+                json!({
+                    "chat_id": "@alex",
+                    "file_path": file_path,
+                    "caption": "Crash-safe file",
+                    "reply_to_message_id": 11,
+                    "mode": "document",
+                    "approved_sha256": sha256
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    let mutation_id = prepared
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/mutation_id"))
+        .and_then(|value| value.as_str())
+        .expect("mutation id");
+    let payload_sha256 = prepared
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/payload_sha256"))
+        .and_then(|value| value.as_str())
+        .expect("payload hash");
+    let requested = client
+        .call_tool(
+            CallToolRequestParams::new("request_mutation_approval").with_arguments(
+                json!({
+                    "mutation_id": mutation_id,
+                    "approved_payload_sha256": payload_sha256
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    let approval_id = requested
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/approval_id"))
+        .and_then(|value| value.as_str())
+        .expect("approval id")
+        .to_string();
+    client.cancel().await?;
+    server_task.await??;
+
+    let ledger = MutationLedger::new(state_db_path.clone());
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
+    assert!(ledger.mark_approval_applying(&approval_id, now)?);
+    let approval = ledger.get_approval(&approval_id)?.expect("applying approval");
+    let MutationAction::SendFile {
+        chat_id,
+        artifact,
+        caption,
+        reply_to_message_id,
+        mode,
+        random_id,
+    } = approval.action.clone()
+    else {
+        anyhow::bail!("prepared action was not a file send")
+    };
+    let artifact_path = state_db_path
+        .with_extension("outbox")
+        .join(&artifact.artifact_id)
+        .join(&artifact.file_name);
+    let accepted_message_id = backend
+        .send_file_with_random_id(
+            None,
+            &chat_id,
+            &artifact_path,
+            &caption,
+            reply_to_message_id,
+            mode,
+            random_id,
+        )
+        .await?;
+    assert_eq!(backend.sent_messages().await.len(), 1);
+    assert_eq!(
+        ledger.get_approval(&approval_id)?.expect("still applying").state,
+        MutationApprovalState::Applying
+    );
+
+    let reopened = McpServer::with_approval(backend.clone(), settings, policy, bot)
+        .map_err(anyhow::Error::msg)?;
+    let worker = reopened.start_approval_worker()?.expect("approval worker");
+    for _ in 0..300 {
+        if ledger.get_approval(&approval_id)?.is_some_and(|approval| {
+            approval.state == MutationApprovalState::Applied
+                && approval.result
+                    == Some(telegram_personal_mcp::MutationResult::FileSent {
+                        message_id: accepted_message_id,
+                        sha256: artifact.sha256.clone(),
+                    })
+        }) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let recovered = ledger.get_approval(&approval_id)?.expect("recovered file approval");
+    assert_eq!(recovered.state, MutationApprovalState::Applied);
+    assert_eq!(backend.sent_messages().await.len(), 1);
+    assert!(!artifact_path.exists());
+    worker.abort();
+    let _ = worker.await;
     Ok(())
 }
 

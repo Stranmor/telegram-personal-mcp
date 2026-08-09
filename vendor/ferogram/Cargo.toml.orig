@@ -1,0 +1,142 @@
+[package]
+name        = "ferogram"
+description = "Production-grade async Telegram MTProto client: updates, bots, flood-wait, dialogs, messages"
+readme      = "README.md"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+authors.workspace    = true
+repository.workspace = true
+homepage.workspace   = true
+documentation = "https://docs.rs/ferogram"
+keywords      = ["telegram", "mtproto", "client", "bot", "async"]
+categories    = ["api-bindings", "network-programming", "asynchronous"]
+
+[dependencies]
+ferogram-fsm       = { workspace = true, optional = true }
+ferogram-connect   = { workspace = true }
+ferogram-mtsender  = { workspace = true }
+ferogram-tl-types  = { workspace = true, features = ["tl-api", "tl-mtproto", "deserializable-functions"] }
+ferogram-mtproto   = { workspace = true }
+ferogram-crypto    = { workspace = true }
+ferogram-session   = { workspace = true }
+ferogram-parsers   = { workspace = true }
+ferogram-derive    = { workspace = true, optional = true }
+ferogram-tl-parser = { workspace = true, optional = true }
+ferogram-tl-gen    = { workspace = true, optional = true }
+tokio          = { version = "1",   features = ["net", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros", "fs"] }
+tokio-util     = "0.7"
+parking_lot    = "0.12"
+dashmap        = "6"
+md5            = "0.7"
+metrics        = "0.24"
+tracing        = { version = "0.1", features = ["log"] }
+log            = "0.4"
+serde          = "1"
+mime_guess     = "2"
+base64         = "0.22"
+chrono         = { version = "0.4", features = ["clock"] }
+reqwest        = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde_json     = "1"
+infer          = { version = "0.19", default-features = false }
+mp4            = { version = "0.14", optional = true }
+sha1           = "0.10.6"
+sha2           = "0.10.9"
+regex          = "1"
+
+[features]
+default = ["parsers", "html"]
+derive          = ["dep:ferogram-derive"]
+sqlite-session  = ["ferogram-session/sqlite-session"]
+experimental    = ["dep:mp4"]
+libsql-session  = ["ferogram-session/libsql-session"]
+serde           = ["ferogram-session/serde"]
+fsm             = ["dep:ferogram-fsm"]
+parsers         = ["ferogram-parsers/html"]
+html            = ["ferogram-parsers/html"]
+html5ever       = ["ferogram-parsers/html5ever"]
+## Re-export the TL parser for custom tooling.
+parser          = ["dep:ferogram-tl-parser"]
+## Re-export the code generator for custom tooling.
+codegen         = ["dep:ferogram-tl-gen"]
+
+[dev-dependencies]
+rand                = "0.8"
+anyhow              = "1"
+tracing-subscriber  = { version = "0.3", features = ["env-filter"] }
+
+# basics
+[[example]]
+name = "hello_self"
+
+[[example]]
+name = "echo_bot"
+
+[[example]]
+name = "filters_showcase"
+
+# userbot tools
+[[example]]
+name = "dialogs_list"
+
+[[example]]
+name = "chat_history"
+
+[[example]]
+name = "search_messages"
+
+[[example]]
+name = "schedule_message"
+
+[[example]]
+name = "download_media"
+
+[[example]]
+name = "get_participants"
+
+[[example]]
+name = "admin_log"
+
+# bots
+[[example]]
+name              = "inline_keyboard"
+required-features = ["parsers"]
+
+[[example]]
+name = "inline_query_bot"
+
+[[example]]
+name = "poll_bot"
+
+[[example]]
+name = "translate_bot"
+
+[[example]]
+name              = "order_bot"
+required-features = ["derive", "fsm"]
+
+[[example]]
+name              = "showcase_bot"
+required-features = ["parsers"]
+
+[[example]]
+name              = "progress_transfer"
+required-features = ["parsers"]
+
+[[example]]
+name = "typed_errors"
+
+# session utilities
+[[example]]
+name = "string_session_gen"
+
+[[example]]
+name = "serverless_userbot"
+
+[[example]]
+name              = "userbot"
+required-features = ["parsers"]
+
+[package.metadata.docs.rs]
+features     = ["sqlite-session", "serde", "fsm", "parsers", "html", "html5ever", "parser", "codegen"]
+rustdoc-args = ["--cfg", "docsrs"]

@@ -1,0 +1,724 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Telegram Personal MCP — agent workspace demo</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "IBM Plex Sans", "Noto Sans", system-ui, sans-serif;
+      --bg: #071017;
+      --panel: #10212d;
+      --panel-soft: #0c1a24;
+      --line: rgba(176, 212, 234, 0.18);
+      --muted: #9bb0bd;
+      --text: #f2f8fb;
+      --cyan: #48c9f2;
+      --green: #4cdb9d;
+      --amber: #ffd071;
+      --red: #ff858c;
+      --telegram: #2aabee;
+      --mono: "JetBrains Mono", "Noto Sans Mono", monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 1200px;
+      height: 676px;
+      margin: 0;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    body {
+      position: relative;
+      background:
+        radial-gradient(circle at 8% 9%, rgba(42, 171, 238, 0.2), transparent 30%),
+        radial-gradient(circle at 91% 87%, rgba(76, 219, 157, 0.14), transparent 31%),
+        linear-gradient(135deg, #071017 0%, #0b1620 54%, #071017 100%);
+    }
+
+    body::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      opacity: 0.2;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+      background-size: 40px 40px;
+      mask-image: linear-gradient(to bottom, black, transparent 92%);
+    }
+
+    .shell {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      height: 100%;
+      padding: 28px 38px 24px;
+      display: grid;
+      grid-template-rows: 38px 1fr 48px;
+      gap: 18px;
+    }
+
+    .topbar, .brand, .badge, .tool, .result-head, .source-head, .approval-head,
+    .buttons, .proof-row, .proof, .progress, .progress-item, .status-row {
+      display: flex;
+      align-items: center;
+    }
+
+    .topbar { justify-content: space-between; }
+
+    .brand {
+      gap: 12px;
+      color: #d5f3ff;
+      font-size: 17px;
+      font-weight: 780;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+
+    .brand-mark {
+      width: 30px;
+      height: 30px;
+      border: 1px solid rgba(72, 201, 242, 0.55);
+      border-radius: 10px;
+      position: relative;
+      background: linear-gradient(145deg, rgba(72, 201, 242, 0.22), rgba(72, 201, 242, 0.04));
+      box-shadow: 0 0 28px rgba(72, 201, 242, 0.18);
+    }
+
+    .brand-mark::before, .brand-mark::after {
+      content: "";
+      position: absolute;
+      height: 2px;
+      border-radius: 2px;
+      background: var(--cyan);
+      transform-origin: left center;
+    }
+
+    .brand-mark::before { width: 16px; left: 7px; top: 10px; transform: rotate(-18deg); }
+    .brand-mark::after { width: 11px; left: 8px; top: 16px; transform: rotate(42deg); }
+
+    .badge {
+      gap: 9px;
+      height: 31px;
+      padding: 0 14px;
+      border: 1px solid rgba(76, 219, 157, 0.31);
+      border-radius: 999px;
+      color: #c5f5de;
+      background: rgba(36, 125, 91, 0.13);
+      font-family: var(--mono);
+      font-size: 15px;
+      letter-spacing: 0.035em;
+      text-transform: uppercase;
+    }
+
+    .badge-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 13px rgba(76, 219, 157, 0.75);
+    }
+
+    .stage { position: relative; min-height: 0; }
+
+    .scene {
+      position: absolute;
+      inset: 0;
+      display: none;
+      min-height: 0;
+    }
+
+    .scene.active { display: grid; }
+
+    .scene-copy {
+      display: grid;
+      align-content: center;
+      max-width: 1050px;
+      padding: 6px 16px 10px;
+    }
+
+    .eyebrow {
+      margin-bottom: 15px;
+      color: var(--cyan);
+      font-family: var(--mono);
+      font-size: 19px;
+      font-weight: 750;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, p { margin: 0; }
+
+    h1 {
+      max-width: 1040px;
+      font-size: 61px;
+      line-height: 1.01;
+      letter-spacing: -0.047em;
+      font-weight: 780;
+    }
+
+    h1 span, h2 span { color: var(--cyan); }
+
+    h2 {
+      font-size: 48px;
+      line-height: 1.04;
+      letter-spacing: -0.038em;
+      font-weight: 770;
+    }
+
+    .lead {
+      max-width: 1010px;
+      margin-top: 22px;
+      color: #bdd0da;
+      font-size: 27px;
+      line-height: 1.32;
+    }
+
+    .lead strong { color: #f5fbfd; }
+
+    .prompt-card {
+      max-width: 1000px;
+      margin-top: 30px;
+      padding: 19px 23px;
+      border: 1px solid rgba(72, 201, 242, 0.26);
+      border-radius: 17px;
+      background: rgba(8, 20, 29, 0.75);
+      color: #e7f2f7;
+      font-size: 22px;
+      line-height: 1.35;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.2);
+    }
+
+    .prompt-card strong { color: var(--cyan); }
+
+    .scene-layout {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 0.73fr 1.27fr;
+      gap: 28px;
+    }
+
+    .scene-heading {
+      display: grid;
+      align-content: center;
+      padding: 12px 0;
+    }
+
+    .scene-heading p {
+      margin-top: 19px;
+      color: #aec2cd;
+      font-size: 24px;
+      line-height: 1.35;
+    }
+
+    .tool {
+      width: max-content;
+      gap: 9px;
+      margin-top: 24px;
+      padding: 9px 13px;
+      border: 1px solid rgba(72, 201, 242, 0.24);
+      border-radius: 10px;
+      color: #bceeff;
+      background: rgba(72, 201, 242, 0.08);
+      font-family: var(--mono);
+      font-size: 21px;
+    }
+
+    .panel {
+      min-height: 0;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      overflow: hidden;
+      background: linear-gradient(180deg, rgba(19, 34, 45, 0.97), rgba(9, 20, 29, 0.96));
+      box-shadow: 0 22px 56px rgba(0, 0, 0, 0.3);
+    }
+
+    .search-panel { padding: 18px; display: grid; gap: 12px; align-content: center; }
+
+    .search-box {
+      padding: 14px 17px;
+      border: 1px solid rgba(72, 201, 242, 0.25);
+      border-radius: 13px;
+      color: #dff6ff;
+      background: rgba(5, 15, 22, 0.55);
+      font-family: var(--mono);
+      font-size: 20px;
+    }
+
+    .result {
+      padding: 15px 17px;
+      border: 1px solid rgba(176, 212, 234, 0.1);
+      border-radius: 14px;
+      background: rgba(17, 34, 46, 0.78);
+    }
+
+    .result.target {
+      border-color: rgba(72, 201, 242, 0.62);
+      background: linear-gradient(145deg, rgba(25, 62, 80, 0.98), rgba(13, 38, 51, 0.98));
+      box-shadow: 0 0 0 3px rgba(72, 201, 242, 0.09);
+    }
+
+    .result-head { justify-content: space-between; margin-bottom: 7px; }
+    .result-chat { color: #f0f8fb; font-size: 23px; font-weight: 750; }
+    .result-id { color: #8ca4b2; font-family: var(--mono); font-size: 16px; }
+    .result-text { color: #c4d5de; font-size: 20px; line-height: 1.28; }
+
+    .chat-panel { display: grid; grid-template-rows: 66px 1fr; }
+
+    .source-head {
+      gap: 14px;
+      padding: 0 20px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(20, 42, 56, 0.72);
+    }
+
+    .avatar {
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      color: #062033;
+      background: linear-gradient(145deg, #75dafd, #2aabee);
+      font-size: 20px;
+      font-weight: 800;
+    }
+
+    .chat-title { font-size: 21px; font-weight: 760; }
+    .chat-subtitle { margin-top: 2px; color: var(--muted); font-size: 15px; }
+
+    .chat-body {
+      display: grid;
+      align-content: center;
+      gap: 18px;
+      padding: 25px 26px;
+      background:
+        radial-gradient(circle at 85% 18%, rgba(42, 171, 238, 0.1), transparent 30%),
+        linear-gradient(155deg, rgba(6, 18, 27, 0.18), rgba(13, 27, 37, 0.88));
+    }
+
+    .bubble {
+      position: relative;
+      max-width: 90%;
+      padding: 17px 20px 15px;
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      border-radius: 18px 18px 18px 6px;
+      background: #172d3b;
+      color: #f0f8fb;
+      font-size: 25px;
+      line-height: 1.28;
+      box-shadow: 0 12px 26px rgba(0, 0, 0, 0.17);
+    }
+
+    .bubble.context {
+      margin-left: auto;
+      border-radius: 18px 18px 6px 18px;
+      border-color: rgba(76, 219, 157, 0.18);
+      background: #17382e;
+    }
+
+    .bubble.source { border-color: rgba(72, 201, 242, 0.55); }
+
+    .sender {
+      margin-bottom: 6px;
+      color: #79d7f5;
+      font-size: 16px;
+      font-weight: 780;
+    }
+
+    .context .sender { color: #85dfb4; }
+
+    .message-id {
+      float: right;
+      margin: 8px 0 0 18px;
+      color: #91a7b3;
+      font-family: var(--mono);
+      font-size: 16px;
+    }
+
+    .draft-panel { padding: 22px 24px; display: grid; align-content: center; gap: 14px; }
+
+    .draft-title { color: #dff6ff; font-size: 25px; font-weight: 780; }
+
+    .field {
+      display: grid;
+      grid-template-columns: 145px 1fr;
+      gap: 16px;
+      align-items: baseline;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(176, 212, 234, 0.09);
+    }
+
+    .field:last-child { border-bottom: 0; }
+    .field-key { color: #8fa5b2; font-size: 18px; }
+    .field-value { color: #edf7fb; font-family: var(--mono); font-size: 19px; line-height: 1.32; }
+    .field-value.reply { font-family: inherit; font-size: 23px; }
+
+    .hash-box {
+      padding: 12px 15px;
+      border-left: 3px solid var(--cyan);
+      border-radius: 7px;
+      color: #a9c7d6;
+      background: rgba(3, 13, 19, 0.5);
+      font-family: var(--mono);
+      font-size: 20px;
+    }
+
+    .approval-panel {
+      padding: 21px 24px;
+      display: grid;
+      grid-template-columns: 0.75fr 1.25fr;
+      gap: 22px;
+      align-items: center;
+    }
+
+    .blocked-card {
+      padding: 22px;
+      border: 1px solid rgba(255, 133, 140, 0.3);
+      border-radius: 17px;
+      background: rgba(80, 24, 31, 0.23);
+    }
+
+    .blocked-label { color: #ffb6ba; font-family: var(--mono); font-size: 17px; }
+    .blocked-title { margin-top: 13px; color: #fff2f3; font-size: 29px; font-weight: 780; line-height: 1.12; }
+    .blocked-detail { margin-top: 13px; color: #d5aeb1; font-size: 18px; line-height: 1.32; }
+
+    .approval-card {
+      padding: 20px;
+      border: 1px solid rgba(42, 171, 238, 0.35);
+      border-radius: 17px;
+      background: linear-gradient(160deg, rgba(27, 57, 74, 0.99), rgba(12, 29, 40, 0.99));
+      box-shadow: 0 20px 42px rgba(0, 0, 0, 0.3);
+    }
+
+    .approval-head { justify-content: space-between; margin-bottom: 14px; }
+    .approval-name { color: #e8f8ff; font-size: 22px; font-weight: 800; }
+
+    .approval-state {
+      padding: 6px 10px;
+      border-radius: 999px;
+      color: #c6eafa;
+      background: rgba(42, 171, 238, 0.14);
+      font-family: var(--mono);
+      font-size: 14px;
+      text-transform: uppercase;
+    }
+
+    .operator-approved .approval-state {
+      color: #c8f7e0;
+      background: rgba(76, 219, 157, 0.16);
+    }
+
+    .approval-meta { color: #b1c5d0; font-size: 17px; line-height: 1.45; }
+
+    .exact-text {
+      margin: 15px 0;
+      padding: 14px 16px;
+      border-left: 3px solid var(--cyan);
+      border-radius: 7px;
+      background: rgba(3, 12, 18, 0.48);
+      color: #f5fbfd;
+      font-size: 21px;
+      line-height: 1.32;
+    }
+
+    .hash { color: #a6c3d1; font-family: var(--mono); font-size: 18px; }
+    .buttons { gap: 10px; margin-top: 16px; }
+
+    .button {
+      flex: 1;
+      height: 43px;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      font-size: 18px;
+      font-weight: 780;
+    }
+
+    .button.cancel { color: #b1c3cc; background: rgba(143, 169, 184, 0.11); }
+    .button.send { color: #fff; background: var(--telegram); box-shadow: 0 9px 20px rgba(42, 171, 238, 0.24); }
+
+    .operator-approved .button.send {
+      background: #18a96f;
+      box-shadow: 0 0 0 5px rgba(76, 219, 157, 0.12), 0 10px 24px rgba(20, 169, 109, 0.28);
+      transform: scale(0.97);
+    }
+
+    .delivery-panel { padding: 21px 24px; display: grid; grid-template-rows: 1fr auto; gap: 17px; }
+
+    .delivery-bubble {
+      align-self: center;
+      margin-left: 9%;
+      padding: 20px 23px;
+      border: 1px solid rgba(76, 219, 157, 0.28);
+      border-radius: 19px 19px 7px 19px;
+      background: linear-gradient(145deg, #176d4d, #11583e);
+      color: #f4fff9;
+      font-size: 25px;
+      line-height: 1.3;
+      box-shadow: 0 16px 34px rgba(0, 0, 0, 0.2);
+    }
+
+    .reply-quote {
+      margin-bottom: 10px;
+      padding-left: 11px;
+      border-left: 3px solid #75e8b2;
+      color: #c7f2dc;
+      font-size: 17px;
+    }
+
+    .receipt {
+      margin-top: 12px;
+      color: #c5f6df;
+      font-family: var(--mono);
+      font-size: 17px;
+      text-align: right;
+    }
+
+    .proof-row { gap: 10px; justify-content: center; }
+
+    .proof {
+      gap: 8px;
+      padding: 10px 13px;
+      border: 1px solid rgba(76, 219, 157, 0.2);
+      border-radius: 10px;
+      color: #c0ddce;
+      background: rgba(18, 58, 43, 0.24);
+      font-family: var(--mono);
+      font-size: 15px;
+    }
+
+    .proof .ok { color: var(--green); font-weight: 900; }
+
+    .progress {
+      justify-content: center;
+      gap: 8px;
+      min-height: 0;
+    }
+
+    .progress-item {
+      gap: 7px;
+      color: #718895;
+      font-family: var(--mono);
+      font-size: 0;
+    }
+
+    .progress-item::before {
+      content: "";
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      background: #314653;
+    }
+
+    .progress-item + .progress-item::after {
+      content: "";
+      order: -1;
+      width: 28px;
+      height: 1px;
+      margin-right: 1px;
+      background: rgba(176, 212, 234, 0.16);
+    }
+
+    .progress-item.done, .progress-item.active { color: #ccecf8; }
+    .progress-item.done::before { background: var(--green); }
+    .progress-item.active::before { background: var(--cyan); box-shadow: 0 0 13px rgba(72, 201, 242, 0.72); }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark"></span> Telegram Personal MCP</div>
+      <div class="badge"><span class="badge-dot"></span> credential-free fixture</div>
+    </header>
+
+    <section class="stage">
+      <article class="scene" data-scene="0">
+        <div class="scene-copy">
+          <div class="eyebrow">Personal account · typed MCP workspace</div>
+          <h1>Let your AI agent work inside <span>your real Telegram.</span></h1>
+          <p class="lead">The host agent finds work, reconstructs exact context, prepares a typed action, and verifies the outcome. <strong>Approval mode can keep the final send human-authorized.</strong></p>
+          <div class="prompt-card"><strong>YOU</strong> Catch me up on the deploy question in Project Room and prepare this reply: “Start at 18:00 UTC. Roll back immediately if any health check fails.”</div>
+        </div>
+      </article>
+
+      <article class="scene" data-scene="1">
+        <div class="scene-layout">
+          <div class="scene-heading">
+            <div class="eyebrow">01 · Discover</div>
+            <h2>Find the right conversation <span>before acting.</span></h2>
+            <p>Bounded dialog search resolves a human title to one canonical Telegram identity.</p>
+            <div class="tool">search_dialogs</div>
+          </div>
+          <div class="panel search-panel">
+            <div class="search-box">query: “Project Room” · scan limit: 10</div>
+            <div class="result target">
+              <div class="result-head"><div class="result-chat">Project Room</div><div class="result-id">rank #1 · title match</div></div>
+              <div class="result-text">Telegram group · chat_ref -202 · canonical_chat_id -202</div>
+            </div>
+            <div class="result">
+              <div class="result-head"><div class="result-chat">Bounded discovery receipt</div><div class="result-id">verified</div></div>
+              <div class="result-text">Scanned <span data-scanned>…</span> dialogs · returned one exact target.</div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="scene" data-scene="2">
+        <div class="scene-layout">
+          <div class="scene-heading">
+            <div class="eyebrow">02 · Understand</div>
+            <h2>Find the exact message. Recover its <span>surrounding context.</span></h2>
+            <p>The reply target stays bound to the searched message and its conversation window.</p>
+            <div class="tool">search_messages → read_context</div>
+          </div>
+          <div class="panel chat-panel">
+            <div class="source-head">
+              <div class="avatar">P</div>
+              <div><div class="chat-title">Project Room</div><div class="chat-subtitle">Telegram group · release coordination</div></div>
+            </div>
+            <div class="chat-body">
+              <div class="bubble context"><div class="sender">You</div>Release candidate passed all health checks.</div>
+              <div class="bubble source"><div class="sender">Alex</div>Production deploy is ready. Should I start now?<span class="message-id">message #22</span></div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="scene" data-scene="3">
+        <div class="scene-layout">
+          <div class="scene-heading">
+            <div class="eyebrow">03 · Prepare</div>
+            <h2>Turn intent into an <span>exact typed action.</span></h2>
+            <p>Recipient, reply target, account, text, and payload hash become one durable draft.</p>
+            <div class="tool">prepare_message</div>
+          </div>
+          <div class="panel draft-panel">
+            <div class="draft-title">Prepared Telegram action</div>
+            <div class="field"><div class="field-key">Chat</div><div class="field-value">Project Room · -202</div></div>
+            <div class="field"><div class="field-key">Reply to</div><div class="field-value">Alex · message #22</div></div>
+            <div class="field"><div class="field-key">Exact text</div><div class="field-value reply">Start at 18:00 UTC. Roll back immediately if any health check fails.</div></div>
+            <div class="hash-box">payload sha256:<span data-full-hash>…</span></div>
+          </div>
+        </div>
+      </article>
+
+      <article class="scene" data-scene="4">
+        <div class="scene-layout">
+          <div class="scene-heading">
+            <div class="eyebrow">04 · Authorize</div>
+            <h2>Approval mode blocks a <span>blind send.</span></h2>
+            <p>The agent can prepare the action. Only the configured operator callback can release this exact draft.</p>
+            <div class="tool">request_send_approval</div>
+          </div>
+          <div class="panel approval-panel">
+            <div class="blocked-card">
+              <div class="blocked-label">send_prepared</div>
+              <div class="blocked-title">APPROVAL_REQUIRED</div>
+              <div class="blocked-detail">Direct dispatch is unreachable while this mode is active.</div>
+            </div>
+            <div class="approval-card">
+              <div class="approval-head"><div class="approval-name">Operator approval</div><div class="approval-state">pending</div></div>
+              <div class="approval-meta">Project Room · reply to Alex #22</div>
+              <div class="exact-text">Start at 18:00 UTC. Roll back immediately if any health check fails.</div>
+              <div class="hash">exact payload hash bound ✓</div>
+              <div class="buttons"><div class="button cancel">Cancel</div><div class="button send">Send exact action</div></div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="scene operator-approved" data-scene="5">
+        <div class="scene-layout">
+          <div class="scene-heading">
+            <div class="eyebrow">05 · Release</div>
+            <h2>The bound operator callback <span>releases the payload.</span></h2>
+            <p>A copied, stale, or second callback cannot create a different action or a second delivery.</p>
+            <div class="tool">operator callback</div>
+          </div>
+          <div class="panel approval-panel">
+            <div class="blocked-card" style="border-color: rgba(76,219,157,.28); background: rgba(20,90,61,.2)">
+              <div class="blocked-label" style="color:#bff2d8">ledger transition</div>
+              <div class="blocked-title" style="color:#f1fff8">PENDING → SENDING</div>
+              <div class="blocked-detail" style="color:#afd3bf">The durable state changes before backend actuation.</div>
+            </div>
+            <div class="approval-card">
+              <div class="approval-head"><div class="approval-name">Operator approval</div><div class="approval-state">approved</div></div>
+              <div class="approval-meta">Project Room · reply to Alex #22</div>
+              <div class="exact-text">Start at 18:00 UTC. Roll back immediately if any health check fails.</div>
+              <div class="hash">exact payload hash bound ✓</div>
+              <div class="buttons"><div class="button cancel">Cancel</div><div class="button send">Approved ✓</div></div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="scene" data-scene="6">
+        <div class="scene-layout">
+          <div class="scene-heading">
+            <div class="eyebrow">06 · Verify</div>
+            <h2>One dispatch through the workflow. <span>Fixture readback confirms.</span></h2>
+            <p>This isolated consumer proof stops at the deterministic backend boundary; live Telegram delivery remains a separate prerelease check.</p>
+            <div class="tool">get_send_approval + read_context</div>
+          </div>
+          <div class="panel delivery-panel">
+            <div class="delivery-bubble">
+              <div class="reply-quote">Replying to Alex · message #22</div>
+              Start at 18:00 UTC. Roll back immediately if any health check fails.
+              <div class="receipt">message #<span data-target>100</span> · fixture-backend readback confirmed ✓</div>
+            </div>
+            <div class="proof-row">
+              <div class="proof"><span class="ok">✓</span> isolated consumer</div>
+              <div class="proof"><span class="ok">✓</span> 1 delivery</div>
+              <div class="proof"><span class="ok">✓</span> duplicate callback safe</div>
+            </div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <footer class="progress">
+      <div class="progress-item" data-progress="1">find</div>
+      <div class="progress-item" data-progress="2">context</div>
+      <div class="progress-item" data-progress="3">prepare</div>
+      <div class="progress-item" data-progress="4">approve</div>
+      <div class="progress-item" data-progress="6">verify</div>
+    </footer>
+  </main>
+
+  <script>
+    const params = new URLSearchParams(location.search);
+    const scene = Math.max(0, Math.min(6, Number(params.get("scene") || 0)));
+    const hash = params.get("hash") || "0000000000000000000000000000000000000000000000000000000000000000";
+    const target = params.get("target") || "100";
+    const scanned = params.get("scanned") || "1";
+
+    document.querySelector(`[data-scene="${scene}"]`).classList.add("active");
+
+    document.querySelectorAll("[data-progress]").forEach((element) => {
+      const point = Number(element.dataset.progress);
+      element.classList.toggle("done", scene > point);
+      element.classList.toggle("active", scene === point || (scene === 5 && point === 4));
+    });
+
+    document.querySelectorAll("[data-full-hash]").forEach((element) => {
+      element.textContent = `${hash.slice(0, 12)}…${hash.slice(-8)}`;
+    });
+
+    document.querySelectorAll("[data-target]").forEach((element) => {
+      element.textContent = target;
+    });
+
+    document.querySelectorAll("[data-scanned]").forEach((element) => {
+      element.textContent = scanned;
+    });
+  </script>
+</body>
+</html>
