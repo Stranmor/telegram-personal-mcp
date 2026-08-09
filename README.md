@@ -45,10 +45,10 @@ The implementation uses the official Rust MCP SDK, pinned to `rmcp 1.7.0`,
 and targets the implemented stable MCP `2025-11-25`. The pin deliberately
 avoids claiming or negotiating MCP `2026-07-28` before that contract is
 implemented here. A regression test requests that version and verifies the
-server falls back to `2025-11-25`. All 306 tools have input/output schemas, MCP
+server falls back to `2025-11-25`. All 307 tools have input/output schemas, MCP
 annotations, and a stable structured result envelope after argument
-deserialization. The binary advertises 17 common tools directly and keeps the
-full 306-tool catalog behind `search_tools`, `describe_tool`,
+deserialization. The binary advertises 23 common tools directly and keeps the
+full 307-tool catalog behind `search_tools`, `describe_tool`,
 `invoke_read_only_tool`, and `invoke_tool`, avoiding a multi-megabyte discovery
 payload for every MCP client without removing capability.
 
@@ -273,10 +273,10 @@ cargo test --test mcp_integration
 
 ## Tools
 
-The internal catalog contains 306 closed-schema tools and is verified
-in-process. The compiled stdio surface advertises 22 common first-class tools;
+The internal catalog contains 307 closed-schema tools and is verified
+in-process. The compiled stdio surface advertises 23 common first-class tools;
 agents find and invoke the remainder through the four typed discovery/gateway
-tools. Thus all 306 tools are gateway-reachable, while the live MCP `tools/list`
+tools. Thus all 307 tools are gateway-reachable, while the live MCP `tools/list`
 response remains authoritative for the compact direct surface.
 
 | Family | Representative tools | Contract |
@@ -308,7 +308,7 @@ response remains authoritative for the compact direct surface.
 | Account and organization | profile, sessions, privacy, notifications, folders, drafts, polls and forum topics | Typed provider state plus approval-backed changes and post-write verification |
 | Stories | list/by-id/archive/viewers/link, view/read/react/pin/stealth, send/edit/report/delete | Full current competitor story union, including exact media hashes and non-replaying uncertain reports |
 | Statistics and boosts | `get_channel_stats`, `get_my_boosts`, `get_boost_status`, `list_boosts`, `apply_boost` | Broadcast/supergroup typed statistics and graph state, cursor-bounded boost reads, exact slot snapshots, operator approval, cooldown checks, idempotent recovery, and provider readback |
-| Approval control plane | `request_send_approval`, `request_mutation_approval` and durable status readers | Exact account/operator/chat/card/hash binding with restart recovery and no blind replay of non-idempotent actions; scheduled approvals fail closed when their delivery time passes and require a new exact time rather than silently sending immediately |
+| Approval and operator bot control plane | `send_operator_bot_rich_message`, `request_send_approval`, `request_mutation_approval` and durable status readers | Bot-originated operator delivery is structurally fixed to the configured agent bot and private operator chat, uses native `sendRichMessage`, and requires provider rich-message readback; approval flows retain exact account/operator/chat/card/hash binding with restart recovery and no blind replay of non-idempotent actions; scheduled approvals fail closed when their delivery time passes and require a new exact time rather than silently sending immediately |
 
 The continuously updated [competitor parity ledger](docs/competitor-parity.md)
 records which broader Telegram families remain incomplete. Compatibility aliases

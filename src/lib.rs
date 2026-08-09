@@ -18,7 +18,7 @@ pub mod telegram;
 
 pub use approval::{
     ApprovalAction, ApprovalBot, ApprovalPolicy, BotApiApprovalBot, FakeApprovalBot,
-    FanoutApprovalBot,
+    FanoutApprovalBot, OperatorRichMessageReceipt,
 };
 pub use backend::TelegramBackend;
 pub use config::Config;

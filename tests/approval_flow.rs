@@ -403,6 +403,87 @@ async fn rich_markdown_keeps_its_kind_through_button_approval_and_dispatch() -> 
 }
 
 #[tokio::test]
+async fn operator_bot_rich_message_is_fixed_to_the_configured_private_chat() -> anyhow::Result<()> {
+    let backend = Arc::new(FakeTelegramBackend::fixture());
+    let bot = Arc::new(FakeApprovalBot::default());
+    let temp = tempfile::tempdir()?;
+    let server = McpServer::with_approval(
+        backend,
+        McpServerSettings {
+            attachment_cache_dir: temp.path().join("attachments"),
+            max_download_bytes: 1024 * 1024,
+            max_upload_bytes: 1024 * 1024,
+            state_db_path: temp.path().join("state.sqlite"),
+        },
+        ApprovalPolicy {
+            approval_chat_id: 700,
+            approval_user_id: 700,
+            ttl_seconds: 3_600,
+            poll_timeout_seconds: 1,
+        },
+        bot.clone(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = ().serve(client_transport).await?;
+    let html = "<h1>Plus accounts</h1><table><tr><th>Date</th><th>Account</th></tr><tr><td>2026-08-09</td><td>user@example.com</td></tr></table>";
+
+    let sent = client
+        .call_tool(
+            CallToolRequestParams::new("send_operator_bot_rich_message").with_arguments(
+                json!({
+                    "html": html,
+                    "current_session_approval": "User explicitly requested this exact private bot delivery"
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(sent.is_error, Some(false));
+    assert_eq!(
+        sent.structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/data/chat_id"))
+            .and_then(|value| value.as_i64()),
+        Some(700)
+    );
+    assert_eq!(
+        sent.structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/data/representation"))
+            .and_then(|value| value.as_str()),
+        Some("telegram_rich_message")
+    );
+    let delivered = bot.sent_operator_rich_messages().await;
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].0, 700);
+    assert_eq!(delivered[0].1, html);
+
+    let weak_authority = client
+        .call_tool(
+            CallToolRequestParams::new("send_operator_bot_rich_message").with_arguments(
+                json!({ "html": html, "current_session_approval": "yes" })
+                    .as_object()
+                    .expect("object")
+                    .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(weak_authority.is_error, Some(true));
+    assert_eq!(bot.sent_operator_rich_messages().await.len(), 1);
+
+    client.cancel().await?;
+    server_task.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_callback_can_bind_a_card_whose_bot_api_receipt_was_lost() -> anyhow::Result<()> {
     let backend = Arc::new(FakeTelegramBackend::fixture());
     let bot = Arc::new(FakeApprovalBot::default());

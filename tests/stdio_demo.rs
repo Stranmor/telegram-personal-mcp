@@ -31,7 +31,7 @@ async fn binary_demo_mode_serves_mcp_over_real_stdio() -> anyhow::Result<()> {
 
     let client = ().serve(transport).await?;
     let tools = client.list_all_tools().await?;
-    assert_eq!(tools.len(), 22);
+    assert_eq!(tools.len(), 23);
     assert!(
         tools
             .iter()
@@ -44,6 +44,7 @@ async fn binary_demo_mode_serves_mcp_over_real_stdio() -> anyhow::Result<()> {
         "search_messages",
         "prepare_message",
         "prepare_rich_message",
+        "send_operator_bot_rich_message",
         "send_saved_rich_message",
         "get_rich_message",
         "request_send_approval",

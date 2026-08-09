@@ -81,7 +81,7 @@ The deterministic fixture and transport tests currently exercise **304** public
 tools in the authoritative in-process catalog. `tests/mcp_integration.rs`
 asserts the exact count, closed input schemas, typed output schemas, and
 representative canonical names. The compiled stdio server deliberately exposes
-17 common first-class entries in `tools/list`; `tests/stdio_demo.rs` proves that
+23 common first-class entries in `tools/list`; `tests/stdio_demo.rs` proves that
 compact direct surface over a child process and reaches the remaining catalog
 through the typed discovery/gateway tools. The 304-tool catalog is therefore
 gateway-reachable, while only 17 tools are first-class in the direct stdio

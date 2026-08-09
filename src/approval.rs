@@ -133,6 +133,16 @@ pub struct ApprovalCardReceipt {
     pub message_id: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorRichMessageReceipt {
+    pub message_id: i64,
+    pub chat_id: i64,
+    pub bot_user_id: i64,
+    pub bot_username: Option<String>,
+    pub payload_sha256: String,
+    pub provider_rich_message_sha256: String,
+}
+
 #[derive(Debug, Clone, Error)]
 #[error("approval bot operation failed ({code})")]
 pub struct ApprovalBotError {
@@ -152,6 +162,12 @@ impl ApprovalBotError {
 
 #[async_trait]
 pub trait ApprovalBot: Send + Sync + 'static {
+    async fn send_operator_rich_message(
+        &self,
+        chat_id: i64,
+        html: &str,
+    ) -> Result<OperatorRichMessageReceipt, ApprovalBotError>;
+
     async fn send_card(&self, card: &ApprovalCard)
     -> Result<ApprovalCardReceipt, ApprovalBotError>;
 
@@ -203,7 +219,7 @@ impl BotApiApprovalBot {
         Self::new_inner(token, api_base, proxy, Some(update_lease))
     }
 
-    fn new_outbound(
+    pub fn new_outbound(
         token: String,
         api_base: String,
         proxy: Option<String>,
@@ -479,6 +495,14 @@ fn read_fanout_updates(
 
 #[async_trait]
 impl ApprovalBot for FanoutApprovalBot {
+    async fn send_operator_rich_message(
+        &self,
+        chat_id: i64,
+        html: &str,
+    ) -> Result<OperatorRichMessageReceipt, ApprovalBotError> {
+        self.outbound.send_operator_rich_message(chat_id, html).await
+    }
+
     async fn send_card(
         &self,
         card: &ApprovalCard,
@@ -533,6 +557,46 @@ impl ApprovalBot for FanoutApprovalBot {
 
 #[async_trait]
 impl ApprovalBot for BotApiApprovalBot {
+    async fn send_operator_rich_message(
+        &self,
+        chat_id: i64,
+        html: &str,
+    ) -> Result<OperatorRichMessageReceipt, ApprovalBotError> {
+        let identity: BotIdentityResult = self.post("getMe", &serde_json::json!({})).await?;
+        if !identity.is_bot || identity.id <= 0 {
+            return Err(ApprovalBotError::known("BOT_IDENTITY_INVALID"));
+        }
+        let response: BotRichMessageResult = self
+            .post(
+                "sendRichMessage",
+                &SendRichMessageRequest {
+                    chat_id,
+                    rich_message: RichMessageRequest { html, skip_entity_detection: false },
+                },
+            )
+            .await?;
+        if response.message_id <= 0 {
+            return Err(ApprovalBotError::uncertain("BOT_MESSAGE_ID_INVALID"));
+        }
+        if response.chat.id != chat_id {
+            return Err(ApprovalBotError::uncertain("BOT_MESSAGE_CHAT_MISMATCH"));
+        }
+        let rich_message = response
+            .rich_message
+            .filter(|value| !value.is_null())
+            .ok_or_else(|| ApprovalBotError::uncertain("BOT_RICH_MESSAGE_READBACK_MISSING"))?;
+        let provider_bytes = serde_json::to_vec(&rich_message)
+            .map_err(|_| ApprovalBotError::uncertain("BOT_RICH_MESSAGE_READBACK_INVALID"))?;
+        Ok(OperatorRichMessageReceipt {
+            message_id: response.message_id,
+            chat_id,
+            bot_user_id: identity.id,
+            bot_username: identity.username,
+            payload_sha256: format!("{:x}", Sha256::digest(html.as_bytes())),
+            provider_rich_message_sha256: format!("{:x}", Sha256::digest(provider_bytes)),
+        })
+    }
+
     async fn send_card(
         &self,
         card: &ApprovalCard,
@@ -5025,6 +5089,18 @@ struct SendMessageRequest {
 }
 
 #[derive(Debug, Serialize)]
+struct SendRichMessageRequest<'a> {
+    chat_id: i64,
+    rich_message: RichMessageRequest<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct RichMessageRequest<'a> {
+    html: &'a str,
+    skip_entity_detection: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct LinkPreviewOptions {
     is_disabled: bool,
 }
@@ -5073,6 +5149,20 @@ struct BotApiEnvelope<T> {
 #[derive(Debug, Deserialize)]
 struct BotMessageResult {
     message_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct BotRichMessageResult {
+    message_id: i64,
+    chat: RawChat,
+    rich_message: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BotIdentityResult {
+    id: i64,
+    is_bot: bool,
+    username: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5182,6 +5272,7 @@ struct FakeApprovalState {
     sent_mutation_cards: Vec<FakeMutationApprovalCard>,
     mutation_edits: Vec<FakeMutationApprovalEdit>,
     answers: Vec<(String, String)>,
+    sent_operator_rich_messages: Vec<(i64, String, OperatorRichMessageReceipt)>,
     lose_next_send_receipt: bool,
 }
 
@@ -5210,6 +5301,12 @@ impl FakeApprovalBot {
 
     pub async fn answers(&self) -> Vec<(String, String)> {
         self.state.lock().await.answers.clone()
+    }
+
+    pub async fn sent_operator_rich_messages(
+        &self,
+    ) -> Vec<(i64, String, OperatorRichMessageReceipt)> {
+        self.state.lock().await.sent_operator_rich_messages.clone()
     }
 
     pub async fn lose_next_send_receipt(&self) {
@@ -5275,6 +5372,29 @@ impl FakeApprovalBot {
 
 #[async_trait]
 impl ApprovalBot for FakeApprovalBot {
+    async fn send_operator_rich_message(
+        &self,
+        chat_id: i64,
+        html: &str,
+    ) -> Result<OperatorRichMessageReceipt, ApprovalBotError> {
+        let mut state = self.state.lock().await;
+        state.next_message_id = state.next_message_id.saturating_add(1).max(1);
+        let receipt = OperatorRichMessageReceipt {
+            message_id: state.next_message_id,
+            chat_id,
+            bot_user_id: 42,
+            bot_username: Some("fixture_agent_bot".to_string()),
+            payload_sha256: format!("{:x}", Sha256::digest(html.as_bytes())),
+            provider_rich_message_sha256: format!("{:x}", Sha256::digest(html.as_bytes())),
+        };
+        state.sent_operator_rich_messages.push((chat_id, html.to_string(), receipt.clone()));
+        if state.lose_next_send_receipt {
+            state.lose_next_send_receipt = false;
+            return Err(ApprovalBotError::uncertain("BOT_API_TRANSPORT_UNCERTAIN"));
+        }
+        Ok(receipt)
+    }
+
     async fn send_card(
         &self,
         card: &ApprovalCard,

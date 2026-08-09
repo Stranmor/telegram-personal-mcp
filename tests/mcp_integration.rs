@@ -39,7 +39,7 @@ async fn official_mcp_transport_exposes_structured_tools_and_typed_errors() -> a
     let client = ().serve(client_transport).await?;
 
     let tools = client.list_all_tools().await?;
-    assert_eq!(tools.len(), 306);
+    assert_eq!(tools.len(), 307);
     assert!(
         tools
             .iter()
@@ -62,6 +62,7 @@ async fn official_mcp_transport_exposes_structured_tools_and_typed_errors() -> a
     assert!(tools.iter().any(|tool| tool.name == "get_unread_poll_votes"));
     assert!(tools.iter().any(|tool| tool.name == "search_messages"));
     assert!(tools.iter().any(|tool| tool.name == "prepare_rich_message"));
+    assert!(tools.iter().any(|tool| tool.name == "send_operator_bot_rich_message"));
     assert!(tools.iter().any(|tool| tool.name == "send_saved_rich_message"));
     assert!(tools.iter().any(|tool| tool.name == "cancel_send_approval"));
     assert!(tools.iter().any(|tool| tool.name == "cancel_mutation_approval"));
