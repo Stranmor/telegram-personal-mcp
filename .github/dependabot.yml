@@ -25,6 +25,9 @@ updates:
           - patch
     ignore:
       # These are deliberate compatibility migrations, not unattended bumps.
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
       - dependency-name: ferogram
         versions:
           - ">= 0.6.3"
@@ -36,7 +39,8 @@ updates:
           - ">= 1.8.0"
       - dependency-name: sha2
         update-types:
-          - version-update:semver-major
+          # Cargo treats 0.10 -> 0.11 as minor even though it may break APIs.
+          - version-update:semver-minor
 
   - package-ecosystem: github-actions
     directory: /
