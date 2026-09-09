@@ -72,6 +72,7 @@ use crate::fs_security::{
 };
 use crate::invite::opaque_invite_handle;
 use crate::profile_photo::{opaque_chat_photo_handle, opaque_profile_photo_handle};
+use crate::session_owner::LockedSessionBackend;
 use crate::sticker::opaque_sticker_handle;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -211,7 +212,12 @@ struct ConnectedSession {
     client: Client,
     _shutdown: ShutdownToken,
     path: PathBuf,
-    _lock: File,
+}
+
+impl Drop for ConnectedSession {
+    fn drop(&mut self) {
+        self._shutdown.cancel();
+    }
 }
 
 /// One live, exclusively locked Telegram connection used for interactive login.
@@ -222,7 +228,12 @@ pub struct LoginSession {
     client: Client,
     _shutdown: ShutdownToken,
     path: PathBuf,
-    _lock: File,
+}
+
+impl Drop for LoginSession {
+    fn drop(&mut self) {
+        self._shutdown.cancel();
+    }
 }
 
 /// Opaque challenge returned after Telegram has sent a login code.
@@ -417,17 +428,8 @@ impl TelegramClient {
         )?;
         let selected_path = Self::prepare_login_target(&selected_path)?;
         let lock = Self::lock_session_file(&selected_path)?;
-        let existed_before_connect = selected_path.is_file();
-        let (client, shutdown) = self.connect_client(&selected_path).await?;
-        if selected_path.is_file()
-            && let Err(error) = restrict_private_file(&selected_path)
-        {
-            if !existed_before_connect {
-                let _ = std::fs::remove_file(&selected_path);
-            }
-            return Err(TelegramError::Io(error));
-        }
-        Ok(LoginSession { client, _shutdown: shutdown, path: selected_path, _lock: lock })
+        let (client, shutdown) = self.connect_client(&selected_path, lock).await?;
+        Ok(LoginSession { client, _shutdown: shutdown, path: selected_path })
     }
 
     pub async fn list_dialogs(
@@ -9232,8 +9234,11 @@ impl TelegramClient {
         }
 
         let lock = Self::lock_session_file(&selected_path)?;
-        let (client, shutdown) = self.connect_client(&selected_path).await?;
-        if !client
+        let (client, shutdown) = self.connect_client(&selected_path, lock).await?;
+        let connected =
+            Arc::new(ConnectedSession { client, _shutdown: shutdown, path: selected_path });
+        if !connected
+            .client
             .is_authorized()
             .await
             .map_err(|error| TelegramError::Telegram(error.to_string()))?
@@ -9241,12 +9246,6 @@ impl TelegramClient {
             return Err(TelegramError::Unauthorized);
         }
 
-        let connected = Arc::new(ConnectedSession {
-            client,
-            _shutdown: shutdown,
-            path: selected_path,
-            _lock: lock,
-        });
         *guard = Some(connected.clone());
         Ok(connected)
     }
@@ -9254,11 +9253,12 @@ impl TelegramClient {
     async fn connect_client(
         &self,
         session_path: &Path,
+        lock: File,
     ) -> Result<(Client, ShutdownToken), TelegramError> {
         let mut builder = Client::builder()
             .api_id(self.config.api_id)
             .api_hash(self.config.api_hash.clone())
-            .session(session_path)
+            .session_backend(Arc::new(LockedSessionBackend::new(session_path.to_path_buf(), lock)))
             // This MCP exposes bounded request/response tools and does not expose
             // Ferogram's realtime update stream. Passive gap recovery therefore
             // adds schema-sensitive background work without serving a consumer.

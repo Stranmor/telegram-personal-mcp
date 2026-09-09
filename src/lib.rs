@@ -12,6 +12,7 @@ pub mod message_cache;
 pub mod mutation_ledger;
 mod profile_photo;
 pub mod protocol;
+mod session_owner;
 pub mod state_db;
 mod sticker;
 pub mod telegram;

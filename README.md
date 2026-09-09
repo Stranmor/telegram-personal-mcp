@@ -510,6 +510,8 @@ blocks `send_file` rather than falling back to weaker host-only confirmation.
 
 ## Configuration
 
+For authorization failures and connection cleanup, see [session recovery](docs/session-recovery.md).
+
 | Environment variable | CLI option | Default / meaning |
 | --- | --- | --- |
 | `TELEGRAM_MCP_DEMO` | `--demo` | Deterministic local MCP fixture; no credentials or Telegram connection |

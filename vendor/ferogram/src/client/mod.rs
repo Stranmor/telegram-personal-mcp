@@ -277,9 +277,7 @@ impl Config {
         username: impl Into<String>,
         password: impl Into<String>,
     ) -> Self {
-        self.socks5 = Some(crate::socks5::Socks5Config::with_auth(
-            addr, username, password,
-        ));
+        self.socks5 = Some(crate::socks5::Socks5Config::with_auth(addr, username, password));
         self
     }
 }
@@ -506,9 +504,7 @@ pub(crate) use ferogram_mtsender::PipelinedSender;
 
 #[inline]
 fn mark_session_snapshot_dirty_impl(inner: &Arc<ClientInner>) {
-    inner
-        .session_snapshot_dirty
-        .store(true, std::sync::atomic::Ordering::Release);
+    inner.session_snapshot_dirty.store(true, std::sync::atomic::Ordering::Release);
 }
 
 /// If `user` is a `User::User` with `is_self == true`, cache its numeric ID
@@ -522,9 +518,7 @@ fn remember_self_id_impl(inner: &Arc<ClientInner>, user: &tl::enums::User) {
     if let tl::enums::User::User(u) = user
         && u.is_self
     {
-        inner
-            .self_user_id
-            .store(u.id, std::sync::atomic::Ordering::Relaxed);
+        inner.self_user_id.store(u.id, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -654,14 +648,10 @@ impl Client {
     pub async fn connect(config: Config) -> Result<(Self, ShutdownToken), InvocationError> {
         // Validate required config fields up-front with clear error messages.
         if config.api_id == 0 {
-            return Err(InvocationError::Deserialize(
-                "api_id must be non-zero".into(),
-            ));
+            return Err(InvocationError::Deserialize("api_id must be non-zero".into()));
         }
         if config.api_hash.is_empty() {
-            return Err(InvocationError::Deserialize(
-                "api_hash must not be empty".into(),
-            ));
+            return Err(InvocationError::Deserialize("api_hash must not be empty".into()));
         }
 
         // Internal dispatch channel. Capacity comes from UpdateConfig; default 2048.
@@ -744,7 +734,7 @@ impl Client {
                                     media_opts.len()
                                 );
                                 (c, s.home_dc_id, opts, media_opts, Some(s))
-                            }
+                            },
                             Err(e) => {
                                 // never call fresh_connect on a TCP blip during
                                 // startup: that would silently destroy the saved session
@@ -756,7 +746,7 @@ impl Client {
                                          returning error (delete session file to reset)"
                                 );
                                 return Err(e.into());
-                            }
+                            },
                         }
                     } else {
                         tracing::info!(
@@ -792,7 +782,7 @@ impl Client {
                     .await?;
                     (c, dc, opts, HashMap::new(), None)
                 }
-            }
+            },
             None => {
                 tracing::info!("[ferogram::client] no saved session found; fresh login required");
                 let (c, dc, opts) = Self::fresh_connect_resilient(
@@ -806,7 +796,7 @@ impl Client {
                 )
                 .await?;
                 (c, dc, opts, HashMap::new(), None)
-            }
+            },
         };
 
         // Build DC pool (used for API/federation calls)
@@ -843,6 +833,10 @@ impl Client {
 
         // Graceful shutdown token.
         let shutdown_token = CancellationToken::new();
+        // Startup owns every task until the initialized client is returned.
+        // Errors and cancellation (including an outer connect timeout) must not
+        // leave detached reconnect loops or session writers behind.
+        let startup_guard = shutdown_token.clone().drop_guard();
         let catch_up = config.catch_up;
         let restart_policy = config.restart_policy;
 
@@ -899,13 +893,12 @@ impl Client {
             session_snapshot_dirty: std::sync::atomic::AtomicBool::new(false),
             experimental: config.experimental_features.clone(),
             diff_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-            future_auth_token: parking_lot::Mutex::new(config.future_auth_token.clone().or_else(
-                || {
-                    loaded_session
-                        .as_ref()
-                        .and_then(|s| s.future_auth_token.clone())
-                },
-            )),
+            future_auth_token: parking_lot::Mutex::new(
+                config
+                    .future_auth_token
+                    .clone()
+                    .or_else(|| loaded_session.as_ref().and_then(|s| s.future_auth_token.clone())),
+            ),
         });
 
         let client = Self {
@@ -946,110 +939,6 @@ impl Client {
                             tokio::time::sleep_until(deadline.into())
                         } => {
                             client_diff.run_pending_differences().await;
-                        }
-                    }
-                }
-            });
-        }
-
-        // Periodic state saver: writes pts/qts/seq/date to the session backend
-        // every 5 seconds if anything has changed. Uses the targeted Primary and
-        // Secondary variants so only the update counters are touched, not the
-        // full session blob. Runs a final save on shutdown.
-        //
-        // The actual backend call is synchronous, blocking I/O (SQLite write,
-        // file write, ...); it's dispatched via spawn_blocking so it can't
-        // stall this task's tokio worker thread. On a server multiplexing
-        // many `Client`s over one runtime, every client runs this task, so a
-        // blocking call here would otherwise periodically stall unrelated
-        // clients sharing the same worker.
-        {
-            let client_ps = client.clone();
-            let shutdown_ps = shutdown_token.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(5));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                interval.tick().await; // skip the first immediate tick
-                let mut last_pts = -1i32;
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = shutdown_ps.cancelled() => {
-                            // Final shutdown: snapshot from MessageBoxes and persist.
-                            let snap = client_ps.inner.message_box.lock().await.session_state();
-                            let (pts, qts, date, seq) = (snap.pts, snap.qts, snap.date, snap.seq);
-                            if pts > 0 {
-                                let backend = Arc::clone(&client_ps.inner.session_backend);
-                                let _ = tokio::task::spawn_blocking(move || {
-                                    let _ = backend.apply_update_state(
-                                        ferogram_session::UpdateStateChange::Primary { pts, date, seq },
-                                    );
-                                    let _ = backend.apply_update_state(
-                                        ferogram_session::UpdateStateChange::Secondary { qts },
-                                    );
-                                }).await;
-                            }
-                            break;
-                        }
-                        _ = interval.tick() => {
-                            let snap = client_ps.inner.message_box.lock().await.session_state();
-                            let (pts, qts, date, seq) = (snap.pts, snap.qts, snap.date, snap.seq);
-                            if pts > last_pts {
-                                let backend = Arc::clone(&client_ps.inner.session_backend);
-                                let _ = tokio::task::spawn_blocking(move || {
-                                    let _ = backend.apply_update_state(
-                                        ferogram_session::UpdateStateChange::Primary { pts, date, seq },
-                                    );
-                                    let _ = backend.apply_update_state(
-                                        ferogram_session::UpdateStateChange::Secondary { qts },
-                                    );
-                                }).await;
-                                last_pts = pts;
-                                tracing::debug!(
-                                    "[ferogram::persist] periodic state snapshot saved (pts={pts}, qts={qts})"
-                                );
-                            }
-                        }
-                    }
-                }
-            });
-        }
-
-        // Full-session snapshot saver: flushes peers, channel_pts, min_peers, and
-        // DC auth/salt data every 60 seconds whenever the peer cache has been
-        // mutated since the last save. The dirty flag is set by mark_session_snapshot_dirty()
-        // which is called after every peer-cache write. On shutdown a final save runs
-        // unconditionally so no data is lost if the process exits between intervals.
-        {
-            let client_full = client.clone();
-            let shutdown_full = shutdown_token.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(60));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                interval.tick().await;
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = shutdown_full.cancelled() => {
-                            let _ = client_full.save_session().await;
-                            break;
-                        }
-                        _ = interval.tick() => {
-                            if client_full
-                                .inner
-                                .session_snapshot_dirty
-                                .swap(false, std::sync::atomic::Ordering::AcqRel)
-                            {
-                                if let Err(e) = client_full.save_session().await {
-                                    tracing::warn!("[ferogram::persist] full snapshot save failed: {e}");
-                                    client_full
-                                        .inner
-                                        .session_snapshot_dirty
-                                        .store(true, std::sync::atomic::Ordering::Release);
-                                } else {
-                                    tracing::debug!("[ferogram::persist] full snapshot saved");
-                                }
-                            }
                         }
                     }
                 }
@@ -1103,7 +992,7 @@ impl Client {
                         entry.time_offset = 0;
                     }
                 }
-                client.save_session().await.ok();
+                client.persist_home_dc().await?;
                 // Pending RPCs are owned by the sender task; fail_all() handles this on error.
 
                 let socks5_r = client.inner.socks5.clone();
@@ -1166,12 +1055,9 @@ impl Client {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
                 client.init_connection().await?;
-                client
-                    .inner
-                    .dh_in_progress
-                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                client.inner.dh_in_progress.store(false, std::sync::atomic::Ordering::SeqCst);
                 // Persist the new auth key so next startup loads the correct key.
-                client.save_session().await.ok();
+                client.persist_home_dc().await?;
 
                 tracing::warn!(
                     "[ferogram::client] session invalidated by server; fresh login required"
@@ -1186,9 +1072,7 @@ impl Client {
         // Calling GetState here (before auth) always returns AUTH_KEY_UNREGISTERED.
 
         // Restore peer access-hash cache from session
-        if let Some(ref s) = loaded_session
-            && !s.peers.is_empty()
-        {
+        if let Some(ref s) = loaded_session {
             let mut cache: tokio::sync::RwLockWriteGuard<'_, PeerCache> =
                 client.inner.peer_cache.write().await;
             for p in &s.peers {
@@ -1236,16 +1120,14 @@ impl Client {
         //                get_difference() fetch what we missed.  Only fall
         //                back to sync_pts_state() when there is no saved
         //                state (first boot, or fresh session).
-        let has_saved_state = loaded_session
-            .as_ref()
-            .is_some_and(|s| s.updates_state.is_initialised());
+        let has_saved_state =
+            loaded_session.as_ref().is_some_and(|s| s.updates_state.is_initialised());
 
-        if client.inner.process_updates && catch_up && has_saved_state {
+        if (!client.inner.process_updates && loaded_session.is_some())
+            || (catch_up && has_saved_state)
+        {
             // Session file has a valid auth key → client is already authorised.
-            client
-                .inner
-                .signed_in
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            client.inner.signed_in.store(true, std::sync::atomic::Ordering::SeqCst);
             let snap = &loaded_session.as_ref().unwrap().updates_state;
             // Restore MessageBoxes from session snapshot.
             {
@@ -1288,7 +1170,9 @@ impl Client {
             tracing::debug!(
                 "[ferogram::client] scheduling getDifference for catch-up after reconnect"
             );
-            client.inner.diff_notify.notify_one();
+            if client.inner.process_updates {
+                client.inner.diff_notify.notify_one();
+            }
         } else {
             // If there is a loaded session the client is already authorised.
             // Mark signed_in so sync_state_after_dh can run after reconnects,
@@ -1298,10 +1182,7 @@ impl Client {
             // after auth completes, so calling it now would produce a guaranteed
             // AUTH_KEY_UNREGISTERED 401 before the credential is exchanged.
             if loaded_session.is_some() {
-                client
-                    .inner
-                    .signed_in
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                client.inner.signed_in.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = client.sync_pts_state().await;
                 // Channel access_hashes are resolved lazily:
                 //   - Already-seen channels are restored from session (s.peers above).
@@ -1312,7 +1193,135 @@ impl Client {
             }
         }
 
+        // Start persistence only after initialization and restoration succeed.
+        // Before restoration only narrow, lease-protected DC updates are allowed.
+        // Periodic state saver: writes pts/qts/seq/date to the session backend
+        // every 5 seconds if anything has changed. Uses the targeted Primary and
+        // Secondary variants so only the update counters are touched, not the
+        // full session blob. Runs a final save on shutdown.
+        //
+        // The actual backend call is synchronous, blocking I/O (SQLite write,
+        // file write, ...); it's dispatched via spawn_blocking so it can't
+        // stall this task's tokio worker thread. On a server multiplexing
+        // many `Client`s over one runtime, every client runs this task, so a
+        // blocking call here would otherwise periodically stall unrelated
+        // clients sharing the same worker.
+        if client.inner.process_updates {
+            let client_ps = client.clone();
+            let shutdown_ps = shutdown_token.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                interval.tick().await; // skip the first immediate tick
+                let mut last_saved_state = None;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_ps.cancelled() => {
+                            // Final shutdown: snapshot from MessageBoxes and persist.
+                            let snap = client_ps.inner.message_box.lock().await.session_state();
+                            let (pts, qts, date, seq) = (snap.pts, snap.qts, snap.date, snap.seq);
+                            if pts > 0 {
+                                let backend = Arc::clone(&client_ps.inner.session_backend);
+                                let saved = tokio::task::spawn_blocking(move || {
+                                    backend.apply_update_state(
+                                        ferogram_session::UpdateStateChange::Primary { pts, date, seq },
+                                    )?;
+                                    backend.apply_update_state(
+                                        ferogram_session::UpdateStateChange::Secondary { qts },
+                                    )
+                                }).await;
+                                if !matches!(saved, Ok(Ok(()))) {
+                                    tracing::warn!("[ferogram::persist] final update-state save failed: {saved:?}");
+                                }
+                            }
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            let snap = client_ps.inner.message_box.lock().await.session_state();
+                            let (pts, qts, date, seq) = (snap.pts, snap.qts, snap.date, snap.seq);
+                            let state = (pts, qts, date, seq);
+                            if last_saved_state != Some(state) {
+                                let backend = Arc::clone(&client_ps.inner.session_backend);
+                                let saved = tokio::task::spawn_blocking(move || {
+                                    backend.apply_update_state(
+                                        ferogram_session::UpdateStateChange::Primary { pts, date, seq },
+                                    )?;
+                                    backend.apply_update_state(
+                                        ferogram_session::UpdateStateChange::Secondary { qts },
+                                    )
+                                }).await;
+                                match saved {
+                                    Ok(Ok(())) => {
+                                        last_saved_state = Some(state);
+                                        tracing::debug!("[ferogram::persist] periodic state snapshot saved (pts={pts}, qts={qts})");
+                                    }
+                                    error => tracing::warn!("[ferogram::persist] update-state save failed; retaining retry: {error:?}"),
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Full-session snapshot saver: flushes peers, channel_pts, min_peers, and
+        // DC auth/salt data every 60 seconds whenever the peer cache has been
+        // mutated since the last save. The dirty flag is set by mark_session_snapshot_dirty()
+        // which is called after every peer-cache write. On shutdown a final save runs
+        // unconditionally so no data is lost if the process exits between intervals.
+        {
+            let client_full = client.clone();
+            let shutdown_full = shutdown_token.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                interval.tick().await;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_full.cancelled() => {
+                            let _ = client_full.save_session().await;
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            if client_full
+                                .inner
+                                .session_snapshot_dirty
+                                .swap(false, std::sync::atomic::Ordering::AcqRel)
+                            {
+                                if let Err(e) = client_full.save_session().await {
+                                    tracing::warn!("[ferogram::persist] full snapshot save failed: {e}");
+                                    client_full
+                                        .inner
+                                        .session_snapshot_dirty
+                                        .store(true, std::sync::atomic::Ordering::Release);
+                                } else {
+                                    tracing::debug!("[ferogram::persist] full snapshot saved");
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        let _ = startup_guard.disarm();
         Ok((client, shutdown_token))
+    }
+
+    /// Persist startup key recovery without snapshotting unrestored peers or counters.
+    async fn persist_home_dc(&self) -> Result<(), InvocationError> {
+        let home = *self.inner.home_dc_id.lock().await;
+        let entry = self.inner.dc_options.lock().await.get(&home).cloned();
+        if let Some(entry) = entry {
+            let backend = Arc::clone(&self.inner.session_backend);
+            tokio::task::spawn_blocking(move || backend.update_dc(&entry))
+                .await
+                .map_err(|error| InvocationError::Deserialize(error.to_string()))?
+                .map_err(|error| InvocationError::Deserialize(error.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Race Obfuscated / Abridged / Http transports using `Connection::connect_raw`.
@@ -1350,14 +1359,14 @@ impl Client {
                             "[ferogram::connect] Obfuscated transport DH complete in {ms}ms"
                         );
                         Ok((c, "Obfuscated", ms))
-                    }
+                    },
                     Err(e) => {
                         let ms = t0.elapsed().as_millis() as u64;
                         tracing::debug!(
                             "[ferogram::connect] Obfuscated transport failed after {ms}ms: {e}"
                         );
                         Err(InvocationError::from(e))
-                    }
+                    },
                 }
             });
         }
@@ -1379,14 +1388,14 @@ impl Client {
                             "[ferogram::connect] Abridged transport DH complete in {ms}ms"
                         );
                         Ok((c, "Abridged", ms))
-                    }
+                    },
                     Err(e) => {
                         let ms = t0.elapsed().as_millis() as u64;
                         tracing::debug!(
                             "[ferogram::connect] Abridged transport failed after {ms}ms: {e}"
                         );
                         Err(InvocationError::from(e))
-                    }
+                    },
                 }
             });
         }
@@ -1403,14 +1412,14 @@ impl Client {
                         let ms = t0.elapsed().as_millis() as u64;
                         tracing::debug!("[ferogram::connect] HTTP transport DH complete in {ms}ms");
                         Ok((c, "Http", ms))
-                    }
+                    },
                     Err(e) => {
                         let ms = t0.elapsed().as_millis() as u64;
                         tracing::debug!(
                             "[ferogram::connect] HTTP transport failed after {ms}ms: {e}"
                         );
                         Err(InvocationError::from(e))
-                    }
+                    },
                 }
             });
         }
@@ -1435,12 +1444,12 @@ impl Client {
                         }
                     }
                     return Ok(conn);
-                }
+                },
                 Ok(Err(e)) => {
                     last_err = e;
-                }
-                Err(e) if e.is_cancelled() => {}
-                Err(_) => {}
+                },
+                Err(e) if e.is_cancelled() => {},
+                Err(_) => {},
             }
         }
         Err(last_err)
@@ -1493,7 +1502,7 @@ impl Client {
                     tracing::warn!(
                         "[ferogram::connect] all transport probes failed ({e}); falling back to default Full transport"
                     );
-                }
+                },
             }
         }
 
@@ -1537,7 +1546,7 @@ impl Client {
                         "[ferogram::connect] DoH fallback: connected to DC{dc_id} via {addr}"
                     );
                     return Ok((conn, dc_id as i32, build_opts()));
-                }
+                },
                 Err(e) => tracing::debug!("[ferogram::connect] DoH address {addr} failed: {e}"),
             }
         }
@@ -1562,7 +1571,7 @@ impl Client {
                                 "[ferogram::connect] Firebase fallback: connected to DC{dc_id} via {addr}"
                             );
                             return Ok((conn, dc_id as i32, build_opts()));
-                        }
+                        },
                         Err(e) => tracing::debug!(
                             "[ferogram::connect] Firebase address {addr} failed: {e}"
                         ),
@@ -1572,7 +1581,7 @@ impl Client {
                     std::io::ErrorKind::ConnectionRefused,
                     "all resilient connect strategies exhausted",
                 )))
-            }
+            },
             None => Err(InvocationError::Io(std::io::Error::new(
                 std::io::ErrorKind::ConnectionRefused,
                 "all resilient connect strategies exhausted (Firebase unavailable)",
@@ -1799,12 +1808,7 @@ impl Client {
     /// uploads and downloads because they are not subject to the API rate
     /// limits applied to the main DC connection.
     pub async fn media_dc_addr(&self, dc_id: i32) -> Option<String> {
-        self.inner
-            .media_dc_options
-            .lock()
-            .await
-            .get(&dc_id)
-            .map(|e| e.addr.clone())
+        self.inner.media_dc_options.lock().await.get(&dc_id).map(|e| e.addr.clone())
     }
 
     /// Return the best media DC address for the current home DC (falls back to
@@ -1831,7 +1835,7 @@ impl Client {
                     "[ferogram::client] is_authorized: auth.getState failed ({e}); assuming not authorized"
                 );
                 Ok(false)
-            }
+            },
             Err(e) => Err(e),
         }
     }
@@ -1861,11 +1865,7 @@ impl Client {
         // Guard: only one UpdateStream is supported per Client clone group.
         // A second call would compete for updates, causing non-deterministic
         // splitting.  Return a closed stream so the caller's loop exits cleanly.
-        if self
-            .inner
-            .stream_active
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
+        if self.inner.stream_active.swap(true, std::sync::atomic::Ordering::SeqCst) {
             tracing::error!(
                 "[ferogram::client] stream_updates() called twice on the same Client; replacing the existing stream"
             );
@@ -1897,29 +1897,29 @@ impl Client {
                                 // peek then pop; try_send takes ownership
                                 ring.pop_front().expect("just peeked"),
                             ) {
-                                Ok(()) => {}
+                                Ok(()) => {},
                                 Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
                                     // Caller not keeping up; put it back and stop draining.
                                     ring.push_front(returned);
                                     break;
-                                }
+                                },
                                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                                     // Caller dropped the UpdateStream; shut down.
                                     return;
-                                }
+                                },
                             }
                         }
 
                         // Deliver directly when ring is empty; buffering here causes one-update lag.
                         if ring.is_empty() {
                             match caller_tx.try_send(upd) {
-                                Ok(()) => {}
+                                Ok(()) => {},
                                 Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
                                     ring.push_back(returned);
-                                }
+                                },
                                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                                     return;
-                                }
+                                },
                             }
                         } else if ring.len() < capacity {
                             // Ring still has backlog; preserve ordering.
@@ -1952,7 +1952,7 @@ impl Client {
                         // Best-effort; ignore send errors (caller may have dropped stream).
                         let _ = caller_tx.send(queued).await;
                     }
-                }
+                },
 
                 // DropNewest: simple try_send (original behaviour)
                 OverflowStrategy::DropNewest => {
@@ -1965,7 +1965,7 @@ impl Client {
                             metrics::counter!("ferogram.updates_dropped").increment(1);
                         }
                     }
-                }
+                },
             }
         });
 
@@ -2049,7 +2049,11 @@ impl Client {
                         Some(FrameEvent::Error(e)) => {
                             tracing::warn!("[ferogram::client] connection error in frame dispatch: {e:?}");
                             // Sender task already called fail_all(); just reconnect.
-                            self.handle_reconnect_after_error().await;
+                            tokio::select! {
+                                biased;
+                                _ = shutdown_token.cancelled() => return,
+                                _ = self.handle_reconnect_after_error() => {}
+                            }
                         }
                     }
                 }
@@ -2078,20 +2082,16 @@ impl Client {
                 let home = *self.inner.home_dc_id.lock().await;
                 let dc_opts = self.inner.dc_options.lock().await;
                 match dc_opts.get(&home) {
-                    Some(e) => (
-                        e.addr.clone(),
-                        home as i16,
-                        e.auth_key,
-                        e.first_salt,
-                        e.time_offset,
-                    ),
+                    Some(e) => {
+                        (e.addr.clone(), home as i16, e.auth_key, e.first_salt, e.time_offset)
+                    },
                     None => {
                         tracing::error!(
                             "[ferogram::client] reconnect failed: no address entry for home DC {home}; cannot reconnect"
                         );
                         delay_ms = (delay_ms * 2).min(RECONNECT_MAX_SECS * 1000);
                         continue;
-                    }
+                    },
                 }
             };
 
@@ -2124,7 +2124,7 @@ impl Client {
                             "[ferogram::client] reconnect: network error with cached key ({e}); will retry"
                         );
                         Err(e)
-                    }
+                    },
                     Err(e) => {
                         tracing::warn!(
                             "[ferogram::client] reconnect: auth key rejected ({e}); falling back to fresh DH"
@@ -2145,7 +2145,7 @@ impl Client {
                             dc_id,
                         )
                         .await
-                    }
+                    },
                 }
             } else {
                 tracing::debug!(
@@ -2204,7 +2204,7 @@ impl Client {
                         }
                     }
                     return;
-                }
+                },
                 Err(e) => {
                     tracing::warn!("[ferogram::client] reconnect attempt failed: {e}");
                     // ENETUNREACHABLE (101) and ECONNABORTED (103) are phone-side
@@ -2222,7 +2222,7 @@ impl Client {
                     } else {
                         delay_ms = RECONNECT_BASE_MS;
                     }
-                }
+                },
             }
         }
     }
@@ -2296,7 +2296,7 @@ impl Client {
                             updates: u.updates,
                             original: Some(original),
                         }
-                    }
+                    },
                     _ => ParsedContainer {
                         seq_info: None,
                         users: vec![],
@@ -2305,7 +2305,7 @@ impl Client {
                         original: None,
                     },
                 }
-            }
+            },
             0x725b04c3 => {
                 // updatesCombined#725b04c3
                 match tl::enums::Updates::deserialize(&mut cur) {
@@ -2318,7 +2318,7 @@ impl Client {
                             updates: u.updates,
                             original: Some(original),
                         }
-                    }
+                    },
                     _ => ParsedContainer {
                         seq_info: None,
                         users: vec![],
@@ -2327,7 +2327,7 @@ impl Client {
                         original: None,
                     },
                 }
-            }
+            },
             0x78d4dec1 => {
                 // updateShort: no users/chats/seq
                 match tl::types::UpdateShort::deserialize(&mut Cursor::from_slice(&body[4..])) {
@@ -2340,7 +2340,7 @@ impl Client {
                             updates: vec![u.update],
                             original: Some(original),
                         }
-                    }
+                    },
                     Err(_) => ParsedContainer {
                         seq_info: None,
                         users: vec![],
@@ -2349,7 +2349,7 @@ impl Client {
                         original: None,
                     },
                 }
-            }
+            },
             // updateShortSentMessage (0x9015e101) as a server-pushed frame:
             // carries pts/pts_count but no user-visible content.  Without this arm
             // it falls to `_ =>` → original:None → MalformedUpdates → Err(Gap) →
@@ -2373,7 +2373,7 @@ impl Client {
                     );
                 }
                 return;
-            }
+            },
             _ => ParsedContainer {
                 seq_info: None,
                 users: vec![],
@@ -2473,23 +2473,23 @@ impl Client {
                                 for &uid in &a.users {
                                     user_ctx.entry(uid).or_insert(ctx);
                                 }
-                            }
+                            },
                             tl::enums::MessageAction::ChatCreate(a) => {
                                 for &uid in &a.users {
                                     user_ctx.entry(uid).or_insert(ctx);
                                 }
-                            }
+                            },
                             tl::enums::MessageAction::ChatDeleteUser(a) => {
                                 user_ctx.entry(a.user_id).or_insert(ctx);
-                            }
+                            },
                             tl::enums::MessageAction::ChatJoinedByLink(a) => {
                                 user_ctx.entry(a.inviter_id).or_insert(ctx);
-                            }
+                            },
                             tl::enums::MessageAction::InviteToGroupCall(a) => {
                                 for &uid in &a.users {
                                     user_ctx.entry(uid).or_insert(ctx);
                                 }
-                            }
+                            },
                             tl::enums::MessageAction::GeoProximityReached(a) => {
                                 if let tl::enums::Peer::User(u) = &a.from_id {
                                     user_ctx.entry(u.user_id).or_insert(ctx);
@@ -2497,15 +2497,15 @@ impl Client {
                                 if let tl::enums::Peer::User(u) = &a.to_id {
                                     user_ctx.entry(u.user_id).or_insert(ctx);
                                 }
-                            }
+                            },
                             tl::enums::MessageAction::RequestedPeer(a) => {
                                 for peer in &a.peers {
                                     if let tl::enums::Peer::User(u) = peer {
                                         user_ctx.entry(u.user_id).or_insert(ctx);
                                     }
                                 }
-                            }
-                            _ => {}
+                            },
+                            _ => {},
                         }
                     }
                 }
@@ -2542,12 +2542,7 @@ impl Client {
                 None => message_box::UpdatesLike::MalformedUpdates,
             };
 
-            let mb_result = self
-                .inner
-                .message_box
-                .lock()
-                .await
-                .process_updates(mb_input);
+            let mb_result = self.inner.message_box.lock().await.process_updates(mb_input);
 
             // Wake the diff task unconditionally. process_updates() may have
             // shrunk MessageBoxes::next_deadline (a possible-gap was buffered
@@ -2594,13 +2589,13 @@ impl Client {
                             }
                         }
                     }
-                }
+                },
                 Err(_gap) => {
                     // Gap detected; deadline loop (Step 5) will fire getDifference.
                     tracing::debug!(
                         "[ferogram::msgbox] gap detected in updates container; getDifference will be triggered on next deadline loop"
                     );
-                }
+                },
             }
         }
     }
@@ -2626,9 +2621,7 @@ impl Client {
     /// `getDifference` starts from the right position.
     pub(crate) async fn sync_pts_state(&self) -> Result<(), InvocationError> {
         use crate::util::decode_checked;
-        let body = self
-            .rpc_call_raw(&tl::functions::updates::GetState {})
-            .await?;
+        let body = self.rpc_call_raw(&tl::functions::updates::GetState {}).await?;
         let tl::enums::updates::State::State(s) =
             decode_checked::<tl::enums::updates::State>("updates.getState", &body)?;
 
@@ -2659,9 +2652,7 @@ impl Client {
     /// stale pts caused by an unknown TL constructor does not re-trigger getDifference.
     async fn force_sync_pts_state(&self) -> Result<(), InvocationError> {
         use crate::util::decode_checked;
-        let body = self
-            .rpc_call_raw(&tl::functions::updates::GetState {})
-            .await?;
+        let body = self.rpc_call_raw(&tl::functions::updates::GetState {}).await?;
         let tl::enums::updates::State::State(s) =
             decode_checked::<tl::enums::updates::State>("updates.getState", &body)?;
         {
@@ -2718,7 +2709,7 @@ impl Client {
                                     self.mark_session_snapshot_dirty();
                                 }
                                 self.emit_raw_updates(updates).await;
-                            }
+                            },
                             Err(e) => {
                                 let preview = &raw[..raw.len().min(16)];
                                 tracing::warn!(
@@ -2734,20 +2725,20 @@ impl Client {
                                         tracing::debug!(
                                             "[ferogram::client] pts re-synced after getDifference parse failure; resuming channel diffs"
                                         );
-                                    }
+                                    },
                                     Err(_sync_err) => {
                                         tracing::warn!(
                                             "[ferogram::client] force_sync_pts_state failed after getDifference parse failure"
                                         );
                                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                    }
+                                    },
                                 }
                                 // Use `continue` (not `break`) so pending channel diffs
                                 // still get a chance to run in the same iteration.
                                 continue;
-                            }
+                            },
                         }
-                    }
+                    },
                     Err(e) => {
                         tracing::warn!("[ferogram::client] getDifference RPC failed: {e}");
                         self.inner.message_box.lock().await.abort_difference();
@@ -2761,7 +2752,7 @@ impl Client {
                         }
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         continue; // let channel diffs run even when common diff RPC fails (server-side error)
-                    }
+                    },
                 }
                 continue;
             }
@@ -2771,11 +2762,7 @@ impl Client {
                 let access_hash = {
                     let cache: tokio::sync::RwLockReadGuard<'_, PeerCache> =
                         self.inner.peer_cache.read().await;
-                    cache
-                        .channels
-                        .get(&channel_id)
-                        .map(|&(h, _)| h)
-                        .unwrap_or(0)
+                    cache.channels.get(&channel_id).map(|&(h, _)| h).unwrap_or(0)
                 };
                 if access_hash == 0 {
                     let auto_resolve = {
@@ -2800,10 +2787,7 @@ impl Client {
                                     .unwrap_or(0);
                                 if h != 0 {
                                     req.channel = tl::enums::InputChannel::InputChannel(
-                                        tl::types::InputChannel {
-                                            channel_id,
-                                            access_hash: h,
-                                        },
+                                        tl::types::InputChannel { channel_id, access_hash: h },
                                     );
                                     // hash now set; fall through to run the diff
                                 } else {
@@ -2815,7 +2799,7 @@ impl Client {
                                     );
                                     continue;
                                 }
-                            }
+                            },
                             Err(ref e) if e.is("CHANNEL_PRIVATE") => {
                                 tracing::info!(
                                     "[ferogram::client] auto_resolve: channel {channel_id} is CHANNEL_PRIVATE; deferring diff"
@@ -2824,7 +2808,7 @@ impl Client {
                                     PrematureEndReason::TemporaryServerIssues,
                                 );
                                 continue;
-                            }
+                            },
                             Err(e) => {
                                 tracing::warn!(
                                     "[ferogram::client] auto_resolve: channel {channel_id} fetch failed ({e}); deferring diff"
@@ -2833,7 +2817,7 @@ impl Client {
                                     PrematureEndReason::TemporaryServerIssues,
                                 );
                                 continue;
-                            }
+                            },
                         }
                     } else {
                         tracing::debug!(
@@ -2884,7 +2868,7 @@ impl Client {
                                     self.mark_session_snapshot_dirty();
                                 }
                                 self.emit_raw_updates(updates).await;
-                            }
+                            },
                             Err(e) => {
                                 let preview = &raw[..raw.len().min(16)];
                                 tracing::warn!(
@@ -2901,9 +2885,9 @@ impl Client {
                                     .await
                                     .end_channel_difference(PrematureEndReason::Banned);
                                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                            }
+                            },
                         }
-                    }
+                    },
                     Err(ref e) if e.is("PERSISTENT_TIMESTAMP_OUTDATED") => {
                         tracing::warn!(
                             "[ferogram::client] getChannelDifference: PERSISTENT_TIMESTAMP_OUTDATED; resetting channel pts"
@@ -2913,7 +2897,7 @@ impl Client {
                             .lock()
                             .await
                             .end_channel_difference(PrematureEndReason::TemporaryServerIssues);
-                    }
+                    },
                     Err(ref e) if e.is("PERSISTENT_TIMESTAMP_INVALID") => {
                         // pts is stale or was never set; Telegram rejects the diff request.
                         // Reset the channel state and let the next update trigger a fresh diff.
@@ -2925,7 +2909,7 @@ impl Client {
                             .lock()
                             .await
                             .end_channel_difference(PrematureEndReason::TemporaryServerIssues);
-                    }
+                    },
                     Err(ref e) if e.is("CHANNEL_PRIVATE") => {
                         tracing::info!(
                             "[ferogram::client] getChannelDifference: channel {channel_id} is now private; dropping from diff queue"
@@ -2935,7 +2919,7 @@ impl Client {
                             .lock()
                             .await
                             .end_channel_difference(PrematureEndReason::Banned);
-                    }
+                    },
                     Err(InvocationError::Rpc(ref rpc)) if rpc.code == 500 => {
                         tracing::warn!(
                             "[ferogram::client] getChannelDifference: server returned 500; will retry after backoff"
@@ -2945,7 +2929,7 @@ impl Client {
                             .lock()
                             .await
                             .end_channel_difference(PrematureEndReason::TemporaryServerIssues);
-                    }
+                    },
                     Err(e) => {
                         tracing::warn!(
                             "[ferogram::client] getChannelDifference for channel {channel_id} failed: {e}"
@@ -2962,7 +2946,7 @@ impl Client {
                         if matches!(&e, InvocationError::Io(_)) || is_auth_error {
                             break;
                         }
-                    }
+                    },
                 }
                 continue;
             }
@@ -3006,13 +2990,12 @@ impl Client {
                 Ok(body) => {
                     metrics::counter!("ferogram.rpc_calls_total", "result" => "ok").increment(1);
                     return Ok(body);
-                }
+                },
                 Err(e) if e.migrate_dc_id().is_some() => {
                     // Telegram is redirecting us to a different DC.
                     // Migrate transparently and retry: no error surfaces to caller.
-                    self.migrate_to(e.migrate_dc_id().expect("matched Migrate variant"))
-                        .await?;
-                }
+                    self.migrate_to(e.migrate_dc_id().expect("matched Migrate variant")).await?;
+                },
                 // AUTH_KEY_UNREGISTERED (401): propagate immediately.
                 // The reader loop does NOT trigger fresh DH on RPC-level 401 errors -
                 // only on TCP disconnects (-404 / UnexpectedEof).  Retrying here was
@@ -3022,7 +3005,7 @@ impl Client {
                 Err(InvocationError::Rpc(ref r)) if r.code == 401 => {
                     metrics::counter!("ferogram.rpc_calls_total", "result" => "error").increment(1);
                     return Err(InvocationError::Rpc(r.clone()));
-                }
+                },
                 // Stale access hash: evict the bad entry from cache and surface
                 // StaleHash so callers can retry with a fresh resolution.
                 Err(InvocationError::Rpc(ref r))
@@ -3042,11 +3025,11 @@ impl Client {
                         r.name
                     );
                     return Err(InvocationError::StaleHash);
-                }
+                },
                 Err(e) => {
                     metrics::counter!("ferogram.rpc_calls_total", "result" => "error").increment(1);
                     rl.advance(e).await?;
-                }
+                },
             }
         }
     }
@@ -3071,9 +3054,9 @@ impl Client {
             .map_err(|_| InvocationError::Deserialize("sender task shut down".into()))?;
         match rx.await {
             Ok(result) => result,
-            Err(_) => Err(InvocationError::Deserialize(
-                "RPC channel closed (sender task died?)".into(),
-            )),
+            Err(_) => {
+                Err(InvocationError::Deserialize("RPC channel closed (sender task died?)".into()))
+            },
         }
     }
 
@@ -3090,20 +3073,16 @@ impl Client {
             match result {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    let ctx = RetryContext {
-                        fail_count,
-                        slept_so_far,
-                        error: e,
-                    };
+                    let ctx = RetryContext { fail_count, slept_so_far, error: e };
                     match self.inner.retry_policy.should_retry(&ctx) {
                         ControlFlow::Continue(delay) => {
                             sleep(delay).await;
                             slept_so_far += delay;
                             fail_count = fail_count.saturating_add(1);
-                        }
+                        },
                         ControlFlow::Break(()) => return Err(ctx.error),
                     }
-                }
+                },
             }
         }
     }
@@ -3304,7 +3283,7 @@ impl Client {
                         "[ferogram::client] migration to DC{new_dc_id}: FLOOD_WAIT_{secs} during initConnection; waiting"
                     );
                     sleep(Duration::from_secs(secs + 1)).await;
-                }
+                },
                 Err(e) => return Err(e),
             }
         }
@@ -3419,10 +3398,7 @@ impl Client {
             *window_start = now;
             self.inner.peer_cache_miss_count.store(1, Ordering::Relaxed);
         } else {
-            let prev = self
-                .inner
-                .peer_cache_miss_count
-                .fetch_add(1, Ordering::Relaxed);
+            let prev = self.inner.peer_cache_miss_count.fetch_add(1, Ordering::Relaxed);
             if prev + 1 >= Self::MISS_THRESHOLD {
                 self.inner.peer_cache_miss_count.store(0, Ordering::Relaxed);
                 drop(window_start);
@@ -3461,11 +3437,7 @@ impl Client {
     ///
     /// [`warm_peer_cache_from_dialogs`]: Client::warm_peer_cache_from_dialogs
     pub async fn channel_kind_of(&self, channel_id: i64) -> Option<crate::types::ChannelKind> {
-        self.inner
-            .peer_cache
-            .read()
-            .await
-            .channel_kind_of(channel_id)
+        self.inner.peer_cache.read().await.channel_kind_of(channel_id)
     }
 
     /// Fetch the first page of dialogs purely to populate the peer cache
@@ -3505,7 +3477,7 @@ impl Client {
                 );
                 self.cache_chats_slice(&d.chats).await;
                 self.cache_users_slice(&d.users).await;
-            }
+            },
             tl::enums::messages::Dialogs::Slice(d) => {
                 tracing::debug!(
                     "[ferogram::client] warm_peer_cache: slice {}, loaded {} dialogs, {} users, {} chats",
@@ -3516,12 +3488,12 @@ impl Client {
                 );
                 self.cache_chats_slice(&d.chats).await;
                 self.cache_users_slice(&d.users).await;
-            }
+            },
             tl::enums::messages::Dialogs::NotModified(_) => {
                 tracing::debug!(
                     "[ferogram::client] warm_peer_cache: getDialogs returned NotModified; cache still current"
                 );
-            }
+            },
         }
         tracing::debug!("[ferogram::client] warm_peer_cache: peer cache refreshed from getDialogs");
         Ok(())
@@ -3611,9 +3583,7 @@ impl Client {
                 let (salt, time_offset) = {
                     let opts = self.inner.dc_options.lock().await;
                     let home = *self.inner.home_dc_id.lock().await;
-                    opts.get(&home)
-                        .map(|e| (e.first_salt, e.time_offset))
-                        .unwrap_or((0, 0))
+                    opts.get(&home).map(|e| (e.first_salt, e.time_offset)).unwrap_or((0, 0))
                 };
                 let conn = if let Some(key) = key {
                     dc_pool::DcConnection::connect_with_key(
@@ -3638,21 +3608,12 @@ impl Client {
                     .await?
                 };
                 // insert THEN init; remove on failure
-                self.inner
-                    .transfer_pool
-                    .lock()
-                    .await
-                    .insert(target_dc, conn);
+                self.inner.transfer_pool.lock().await.insert(target_dc, conn);
                 if let Err(e) = self.init_transfer_session(target_dc).await {
                     tracing::warn!(
                         "[ferogram::transfer] initConnection for DC{target_dc} failed: {e}; evicting connection"
                     );
-                    self.inner
-                        .transfer_pool
-                        .lock()
-                        .await
-                        .conns
-                        .remove(&target_dc);
+                    self.inner.transfer_pool.lock().await.conns.remove(&target_dc);
                     return Err(e);
                 }
             } else {
@@ -3684,21 +3645,12 @@ impl Client {
                     .await?;
                     // Cached key skips DH but importAuthorization is still required
                     // to activate the account on this session.
-                    self.inner
-                        .transfer_pool
-                        .lock()
-                        .await
-                        .insert(target_dc, conn);
+                    self.inner.transfer_pool.lock().await.insert(target_dc, conn);
                     if let Err(e) = self.export_import_auth_transfer(target_dc).await {
                         tracing::warn!(
                             "[ferogram::transfer] importAuth for DC{target_dc} failed: {e}; evicting and retrying with fresh DH"
                         );
-                        self.inner
-                            .transfer_pool
-                            .lock()
-                            .await
-                            .conns
-                            .remove(&target_dc);
+                        self.inner.transfer_pool.lock().await.conns.remove(&target_dc);
                         return Err(e);
                     }
                 } else {
@@ -3714,21 +3666,12 @@ impl Client {
                     )
                     .await?;
                     // insert then import; evict on failure
-                    self.inner
-                        .transfer_pool
-                        .lock()
-                        .await
-                        .insert(target_dc, conn);
+                    self.inner.transfer_pool.lock().await.insert(target_dc, conn);
                     if let Err(e) = self.export_import_auth_transfer(target_dc).await {
                         tracing::warn!(
                             "[ferogram::transfer] auth export/import for DC{target_dc} failed: {e}; evicting"
                         );
-                        self.inner
-                            .transfer_pool
-                            .lock()
-                            .await
-                            .conns
-                            .remove(&target_dc);
+                        self.inner.transfer_pool.lock().await.conns.remove(&target_dc);
                         return Err(e);
                     }
                     // Save the newly obtained foreign-DC auth key so the NEXT
@@ -3768,21 +3711,10 @@ impl Client {
             }
         }
 
-        let dc_entries: Vec<crate::DcEntry> = self
-            .inner
-            .dc_options
-            .lock()
-            .await
-            .values()
-            .cloned()
-            .collect();
-        let result = self
-            .inner
-            .transfer_pool
-            .lock()
-            .await
-            .invoke_on_dc(target_dc, &dc_entries, req)
-            .await;
+        let dc_entries: Vec<crate::DcEntry> =
+            self.inner.dc_options.lock().await.values().cloned().collect();
+        let result =
+            self.inner.transfer_pool.lock().await.invoke_on_dc(target_dc, &dc_entries, req).await;
         // Evict on fatal auth errors. Connection-death eviction (the old
         // Io(_) branch here) is now handled inside DcPool::invoke_on_dc
         // itself: connection failures surface as InvocationError::Deserialize
@@ -3835,12 +3767,7 @@ impl Client {
                 query: tl::functions::help::GetConfig {},
             },
         };
-        self.inner
-            .transfer_pool
-            .lock()
-            .await
-            .invoke_on_dc_serializable(dc_id, &wrapped)
-            .await?;
+        self.inner.transfer_pool.lock().await.invoke_on_dc_serializable(dc_id, &wrapped).await?;
         tracing::debug!("[ferogram::client] transfer connection to DC{dc_id} initialized");
         Ok(())
     }
@@ -3877,12 +3804,7 @@ impl Client {
                 },
             },
         };
-        self.inner
-            .transfer_pool
-            .lock()
-            .await
-            .invoke_on_dc_serializable(dc_id, &wrapped)
-            .await?;
+        self.inner.transfer_pool.lock().await.invoke_on_dc_serializable(dc_id, &wrapped).await?;
         tracing::debug!(
             "[ferogram::client] transfer connection to DC{dc_id} initialized with imported auth"
         );
@@ -3930,9 +3852,7 @@ impl Client {
             let (salt, time_offset) = {
                 let opts = self.inner.dc_options.lock().await;
                 let home = *self.inner.home_dc_id.lock().await;
-                opts.get(&home)
-                    .map(|e| (e.first_salt, e.time_offset))
-                    .unwrap_or((0, 0))
+                opts.get(&home).map(|e| (e.first_salt, e.time_offset)).unwrap_or((0, 0))
             };
             let mut conn = if let Some(key) = key {
                 dc_pool::DcConnection::connect_with_key(
@@ -4110,16 +4030,14 @@ impl Client {
                         '_,
                         std::collections::HashMap<i32, DcEntry>,
                     > = self.inner.dc_options.lock().await;
-                    let entry = opts
-                        .entry(target_dc)
-                        .or_insert_with(|| crate::session::DcEntry {
-                            dc_id: target_dc,
-                            addr: addr.clone(),
-                            auth_key: None,
-                            first_salt: 0,
-                            time_offset: 0,
-                            flags: crate::session::DcFlags::NONE,
-                        });
+                    let entry = opts.entry(target_dc).or_insert_with(|| crate::session::DcEntry {
+                        dc_id: target_dc,
+                        addr: addr.clone(),
+                        auth_key: None,
+                        first_salt: 0,
+                        time_offset: 0,
+                        flags: crate::session::DcFlags::NONE,
+                    });
                     entry.auth_key = Some(conn.auth_key_bytes());
                     entry.first_salt = conn.first_salt();
                     entry.time_offset = conn.time_offset();
@@ -4152,9 +4070,7 @@ impl Client {
     ) -> Result<PipelinedSender, InvocationError> {
         let conn = self.open_worker_conn(dc_id).await?;
         let (stream, frame_kind, enc) = conn.into_parts();
-        Ok(ferogram_mtsender::spawn_pipelined(
-            stream, enc, frame_kind, None,
-        ))
+        Ok(ferogram_mtsender::spawn_pipelined(stream, enc, frame_kind, None))
     }
 
     /// Like rpc_call_raw but takes a Serializable (for InvokeWithLayer wrappers).
@@ -4168,20 +4084,16 @@ impl Client {
             match self.do_rpc_write_returning_body(req).await {
                 Ok(body) => return Ok(body),
                 Err(e) => {
-                    let ctx = RetryContext {
-                        fail_count,
-                        slept_so_far,
-                        error: e,
-                    };
+                    let ctx = RetryContext { fail_count, slept_so_far, error: e };
                     match self.inner.retry_policy.should_retry(&ctx) {
                         ControlFlow::Continue(delay) => {
                             sleep(delay).await;
                             slept_so_far += delay;
                             fail_count = fail_count.saturating_add(1);
-                        }
+                        },
                         ControlFlow::Break(()) => return Err(ctx.error),
                     }
-                }
+                },
             }
         }
     }
@@ -4201,9 +4113,9 @@ impl Client {
             .map_err(|_| InvocationError::Deserialize("sender task shut down".into()))?;
         match rx.await {
             Ok(result) => result,
-            Err(_) => Err(InvocationError::Deserialize(
-                "rpc channel closed (sender task died?)".into(),
-            )),
+            Err(_) => {
+                Err(InvocationError::Deserialize("rpc channel closed (sender task died?)".into()))
+            },
         }
     }
 
@@ -4301,9 +4213,7 @@ impl Client {
                     };
                     let (salt, time_offset) = {
                         let opts = self.inner.dc_options.lock().await;
-                        opts.get(&dc_id)
-                            .map(|e| (e.first_salt, e.time_offset))
-                            .unwrap_or((0, 0))
+                        opts.get(&dc_id).map(|e| (e.first_salt, e.time_offset)).unwrap_or((0, 0))
                     };
                     let mut conn = if let Some(key) = key {
                         dc_pool::DcConnection::connect_with_key(
@@ -4472,16 +4382,14 @@ impl Client {
                         '_,
                         std::collections::HashMap<i32, DcEntry>,
                     > = self.inner.dc_options.lock().await;
-                    let entry = opts
-                        .entry(dc_id)
-                        .or_insert_with(|| crate::session::DcEntry {
-                            dc_id,
-                            addr: addr.clone(),
-                            auth_key: None,
-                            first_salt: 0,
-                            time_offset: 0,
-                            flags: crate::session::DcFlags::NONE,
-                        });
+                    let entry = opts.entry(dc_id).or_insert_with(|| crate::session::DcEntry {
+                        dc_id,
+                        addr: addr.clone(),
+                        auth_key: None,
+                        first_salt: 0,
+                        time_offset: 0,
+                        flags: crate::session::DcFlags::NONE,
+                    });
                     entry.auth_key = Some(key);
                     entry.first_salt = live_salt;
                     entry.time_offset = live_time_offset;
@@ -4491,14 +4399,8 @@ impl Client {
             }
         }
 
-        let dc_entries: Vec<crate::DcEntry> = self
-            .inner
-            .dc_options
-            .lock()
-            .await
-            .values()
-            .cloned()
-            .collect();
+        let dc_entries: Vec<crate::DcEntry> =
+            self.inner.dc_options.lock().await.values().cloned().collect();
         // DcPool::invoke_on_dc evicts the broken slot and retries on a fresh
         // connection internally when the worker's sender task dies, so no
         // extra eviction is needed here. Connection failures surface as
@@ -4506,12 +4408,7 @@ impl Client {
         // way to preserve the original Io/etc. kind once it has fanned the
         // error out to every caller waiting on that connection), not as
         // InvocationError::Io, so don't match on the Io variant here.
-        self.inner
-            .dc_pool
-            .lock()
-            .await
-            .invoke_on_dc(dc_id, &dc_entries, req)
-            .await
+        self.inner.dc_pool.lock().await.invoke_on_dc(dc_id, &dc_entries, req).await
     }
 }
 
@@ -4521,10 +4418,10 @@ pub(crate) fn attach_client_to_update(u: update::Update, client: &Client) -> upd
     match u {
         update::Update::NewMessage(msg) => {
             update::Update::NewMessage(msg.with_client(client.clone()))
-        }
+        },
         update::Update::MessageEdited(msg) => {
             update::Update::MessageEdited(msg.with_client(client.clone()))
-        }
+        },
         other => other,
     }
 }

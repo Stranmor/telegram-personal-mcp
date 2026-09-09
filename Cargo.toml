@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["."]
-exclude = ["vendor/ferogram"]
+exclude = ["vendor/ferogram", "vendor/ferogram-mtsender"]
 
 [workspace.package]
 version = "0.2.0"
@@ -62,3 +62,4 @@ tempfile = "3"
 # background update-gap tracking while retaining RPC updates returned directly
 # by write calls. This avoids schema-churn loops in an otherwise idle MCP.
 ferogram = { path = "vendor/ferogram" }
+ferogram-mtsender = { path = "vendor/ferogram-mtsender" }
