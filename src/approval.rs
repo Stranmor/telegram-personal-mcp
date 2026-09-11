@@ -1727,45 +1727,52 @@ fn render_schedule_message_card(
     silent: bool,
     noforwards: bool,
 ) -> Result<String, ApprovalBotError> {
-    let (title, note) = match approval.state {
-        MutationApprovalState::DispatchingCard | MutationApprovalState::Pending => (
-            "<b>🗓 Запланировать сообщение?</b>",
-            "После подтверждения Telegram добавит сообщение в расписание.",
-        ),
-        MutationApprovalState::CardDeliveryUncertain => (
-            "⚠️ <b>Карточка могла не доставиться</b>",
-            "Не создавайте повтор: система сначала сверит состояние.",
-        ),
-        MutationApprovalState::Applying => (
-            "⏳ <b>Добавляю сообщение в расписание…</b>",
-            "Решение принято. Ожидаю подтверждение Telegram.",
-        ),
-        MutationApprovalState::OutcomeUnknown => (
-            "⚠️ <b>Проверяю расписание</b>",
-            "Telegram не подтвердил результат. Повтор без безопасной сверки отключён.",
-        ),
-        MutationApprovalState::Applied => (
-            "✅ <b>Сообщение запланировано</b>",
-            "Telegram подтвердил, что сообщение находится в расписании.",
-        ),
-        MutationApprovalState::Cancelled => {
-            ("Планирование отменено", "Сообщение не добавлялось в расписание.")
-        },
-        MutationApprovalState::Expired
-            if approval.last_error_code.as_deref() == Some("SCHEDULE_TIME_ELAPSED") =>
-        {
-            (
-                "⌛ <b>Время отправки прошло</b>",
-                "Ничего не отправлено. Для другого времени требуется новое точное подтверждение.",
-            )
-        },
-        MutationApprovalState::Expired => {
-            ("Подтверждение истекло", "Сообщение не добавлялось в расписание.")
-        },
-        MutationApprovalState::Failed => (
-            "⚠️ <b>Не удалось запланировать сообщение</b>",
-            "Сообщение не считается добавленным в расписание.",
-        ),
+    let (title, note) = if approval.external_owner_ready {
+        (
+            "✅ <b>Подтверждено для Hermes</b>",
+            "Оператор подтвердил действие. Hermes получил одноразовое право выполнить внешний provider-вызов.",
+        )
+    } else {
+        match approval.state {
+            MutationApprovalState::DispatchingCard | MutationApprovalState::Pending => (
+                "<b>🗓 Запланировать сообщение?</b>",
+                "После подтверждения Telegram добавит сообщение в расписание.",
+            ),
+            MutationApprovalState::CardDeliveryUncertain => (
+                "⚠️ <b>Карточка могла не доставиться</b>",
+                "Не создавайте повтор: система сначала сверит состояние.",
+            ),
+            MutationApprovalState::Applying => (
+                "⏳ <b>Добавляю сообщение в расписание…</b>",
+                "Решение принято. Ожидаю подтверждение Telegram.",
+            ),
+            MutationApprovalState::OutcomeUnknown => (
+                "⚠️ <b>Проверяю расписание</b>",
+                "Telegram не подтвердил результат. Повтор без безопасной сверки отключён.",
+            ),
+            MutationApprovalState::Applied => (
+                "✅ <b>Сообщение запланировано</b>",
+                "Telegram подтвердил, что сообщение находится в расписании.",
+            ),
+            MutationApprovalState::Cancelled => {
+                ("Планирование отменено", "Сообщение не добавлялось в расписание.")
+            },
+            MutationApprovalState::Expired
+                if approval.last_error_code.as_deref() == Some("SCHEDULE_TIME_ELAPSED") =>
+            {
+                (
+                    "⌛ <b>Время отправки прошло</b>",
+                    "Ничего не отправлено. Для другого времени требуется новое точное подтверждение.",
+                )
+            },
+            MutationApprovalState::Expired => {
+                ("Подтверждение истекло", "Сообщение не добавлялось в расписание.")
+            },
+            MutationApprovalState::Failed => (
+                "⚠️ <b>Не удалось запланировать сообщение</b>",
+                "Сообщение не считается добавленным в расписание.",
+            ),
+        }
     };
     let reply_detail = reply_to
         .map(|reply| format!("\n↩️ Ответ на сообщение {}", reply.message_id))
@@ -1816,45 +1823,52 @@ fn render_schedule_file_card(
     noforwards: bool,
     mode: crate::domain::FileSendMode,
 ) -> Result<String, ApprovalBotError> {
-    let (title, note) = match approval.state {
-        MutationApprovalState::DispatchingCard | MutationApprovalState::Pending => (
-            "<b>🗓 Запланировать медиа?</b>",
-            "После подтверждения Telegram добавит файл в расписание.",
-        ),
-        MutationApprovalState::CardDeliveryUncertain => (
-            "⚠️ <b>Карточка могла не доставиться</b>",
-            "Не создавайте повтор: система сначала сверит состояние.",
-        ),
-        MutationApprovalState::Applying => (
-            "⏳ <b>Добавляю медиа в расписание…</b>",
-            "Решение принято. Ожидаю подтверждение Telegram.",
-        ),
-        MutationApprovalState::OutcomeUnknown => (
-            "⚠️ <b>Проверяю расписание</b>",
-            "Telegram не подтвердил результат. Повтор без безопасной сверки отключён.",
-        ),
-        MutationApprovalState::Applied => (
-            "✅ <b>Медиа запланировано</b>",
-            "Telegram подтвердил, что файл находится в расписании.",
-        ),
-        MutationApprovalState::Cancelled => {
-            ("Планирование отменено", "Файл не добавлялся в расписание.")
-        },
-        MutationApprovalState::Expired
-            if approval.last_error_code.as_deref() == Some("SCHEDULE_TIME_ELAPSED") =>
-        {
-            (
-                "⌛ <b>Время отправки прошло</b>",
-                "Ничего не отправлено. Для другого времени требуется новое точное подтверждение.",
-            )
-        },
-        MutationApprovalState::Expired => {
-            ("Подтверждение истекло", "Файл не добавлялся в расписание.")
-        },
-        MutationApprovalState::Failed => (
-            "⚠️ <b>Не удалось запланировать медиа</b>",
-            "Файл не считается добавленным в расписание.",
-        ),
+    let (title, note) = if approval.external_owner_ready {
+        (
+            "✅ <b>Подтверждено для Hermes</b>",
+            "Оператор подтвердил действие. Hermes получил одноразовое право выполнить внешний provider-вызов.",
+        )
+    } else {
+        match approval.state {
+            MutationApprovalState::DispatchingCard | MutationApprovalState::Pending => (
+                "<b>🗓 Запланировать медиа?</b>",
+                "После подтверждения Telegram добавит файл в расписание.",
+            ),
+            MutationApprovalState::CardDeliveryUncertain => (
+                "⚠️ <b>Карточка могла не доставиться</b>",
+                "Не создавайте повтор: система сначала сверит состояние.",
+            ),
+            MutationApprovalState::Applying => (
+                "⏳ <b>Добавляю медиа в расписание…</b>",
+                "Решение принято. Ожидаю подтверждение Telegram.",
+            ),
+            MutationApprovalState::OutcomeUnknown => (
+                "⚠️ <b>Проверяю расписание</b>",
+                "Telegram не подтвердил результат. Повтор без безопасной сверки отключён.",
+            ),
+            MutationApprovalState::Applied => (
+                "✅ <b>Медиа запланировано</b>",
+                "Telegram подтвердил, что файл находится в расписании.",
+            ),
+            MutationApprovalState::Cancelled => {
+                ("Планирование отменено", "Файл не добавлялся в расписание.")
+            },
+            MutationApprovalState::Expired
+                if approval.last_error_code.as_deref() == Some("SCHEDULE_TIME_ELAPSED") =>
+            {
+                (
+                    "⌛ <b>Время отправки прошло</b>",
+                    "Ничего не отправлено. Для другого времени требуется новое точное подтверждение.",
+                )
+            },
+            MutationApprovalState::Expired => {
+                ("Подтверждение истекло", "Файл не добавлялся в расписание.")
+            },
+            MutationApprovalState::Failed => (
+                "⚠️ <b>Не удалось запланировать медиа</b>",
+                "Файл не считается добавленным в расписание.",
+            ),
+        }
     };
     let reply_detail = reply_to
         .map(|reply| format!("\n↩️ Ответ на сообщение {}", reply.message_id))
@@ -1907,7 +1921,7 @@ fn render_mutation_card(card: &MutationApprovalCard) -> Result<String, ApprovalB
         schedule_date_unix,
         silent,
         noforwards,
-        random_id: _,
+        ..
     } = &approval.action
     {
         return render_schedule_message_card(
@@ -1952,24 +1966,28 @@ fn render_mutation_card(card: &MutationApprovalCard) -> Result<String, ApprovalB
             *mode,
         );
     }
-    let status = match approval.state {
-        MutationApprovalState::DispatchingCard | MutationApprovalState::Pending => {
-            "⏳ Ожидает вашего решения"
-        },
-        MutationApprovalState::CardDeliveryUncertain => {
-            "⚠️ Доставка этой карточки не была подтверждена"
-        },
-        MutationApprovalState::Applying => "⏳ Подтверждено. Применяю…",
-        MutationApprovalState::OutcomeUnknown if approval.next_retry_at_unix.is_none() => {
-            "⚠️ Результат неизвестен; автоматический повтор отключён"
-        },
-        MutationApprovalState::OutcomeUnknown => {
-            "⚠️ Telegram пока не подтвердил результат; выполняется проверка состояния"
-        },
-        MutationApprovalState::Applied => "✅ Применено",
-        MutationApprovalState::Cancelled => "❌ Отменено",
-        MutationApprovalState::Expired => "⌛ Подтверждение истекло",
-        MutationApprovalState::Failed => "⚠️ Изменение завершилось ошибкой",
+    let status = if approval.external_owner_ready {
+        "✅ Подтверждено. Передано владельцу операции"
+    } else {
+        match approval.state {
+            MutationApprovalState::DispatchingCard | MutationApprovalState::Pending => {
+                "⏳ Ожидает вашего решения"
+            },
+            MutationApprovalState::CardDeliveryUncertain => {
+                "⚠️ Доставка этой карточки не была подтверждена"
+            },
+            MutationApprovalState::Applying => "⏳ Подтверждено. Применяю…",
+            MutationApprovalState::OutcomeUnknown if approval.next_retry_at_unix.is_none() => {
+                "⚠️ Результат неизвестен; автоматический повтор отключён"
+            },
+            MutationApprovalState::OutcomeUnknown => {
+                "⚠️ Telegram пока не подтвердил результат; выполняется проверка состояния"
+            },
+            MutationApprovalState::Applied => "✅ Применено",
+            MutationApprovalState::Cancelled => "❌ Отменено",
+            MutationApprovalState::Expired => "⌛ Подтверждение истекло",
+            MutationApprovalState::Failed => "⚠️ Изменение завершилось ошибкой",
+        }
     };
     let (title, target, payload, result) = match &approval.action {
         MutationAction::SendTypingAction { chat_id, action } => {
@@ -3060,7 +3078,7 @@ fn render_mutation_card(card: &MutationApprovalCard) -> Result<String, ApprovalB
             schedule_date_unix,
             silent,
             noforwards,
-            random_id: _,
+            ..
         } => (
             "ПЛАНИРОВАНИЕ СООБЩЕНИЯ",
             format!(
@@ -3133,12 +3151,13 @@ fn render_mutation_card(card: &MutationApprovalCard) -> Result<String, ApprovalB
             chat_id,
             before,
             text,
+            parse_mode,
             schedule_date_unix,
         } => (
             "ИЗМЕНЕНИЕ ЗАПЛАНИРОВАННОГО СООБЩЕНИЯ",
             format!("Чат: {chat_id}\nScheduled message_id: {}", before.message_id),
             format!(
-                "Текущая доставка: Unix {}\nНовая доставка: {}\n\nТекущий текст:\n────────────\n{}\n────────────\n\nНовый текст:\n────────────\n{text}\n────────────",
+                "Текущая доставка: Unix {}\nНовая доставка: {}\nФормат: {parse_mode:?}\n\nТекущий текст:\n────────────\n{}\n────────────\n\nНовый текст:\n────────────\n{text}\n────────────",
                 before.date_unix,
                 if *schedule_date_unix == 0x7fff_fffe {
                     "когда пользователь появится онлайн".to_string()
@@ -5001,7 +5020,9 @@ fn keyboard_for(approval: &SendApproval) -> InlineKeyboardMarkup {
 }
 
 fn keyboard_for_mutation(approval: &MutationApproval) -> InlineKeyboardMarkup {
-    let buttons = if matches!(
+    let buttons = if approval.external_owner_ready {
+        Vec::new()
+    } else if matches!(
         approval.state,
         MutationApprovalState::DispatchingCard
             | MutationApprovalState::Pending
@@ -5490,6 +5511,7 @@ impl ApprovalBot for FakeApprovalBot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::MutationExecutionOwner;
 
     fn sample_send_approval(state: SendApprovalState) -> SendApproval {
         SendApproval {
@@ -5556,6 +5578,7 @@ mod tests {
                     relation: Some(OutboundSourceRelation::TriggeredOutreach),
                 })),
                 text: "Первый абзац сообщения.\n\nВторой абзац.".to_string(),
+                parse_mode: crate::domain::CaptionParseMode::Plain,
                 reply_to: None,
                 schedule_date_unix: 1_785_565_800,
                 silent: false,
@@ -5565,6 +5588,9 @@ mod tests {
             payload_sha256: "8969cef6ec15b619f2cff6df93551464480507d4261782c91e096d0843531e45"
                 .to_string(),
             state,
+            execution_owner: MutationExecutionOwner::ManagedMcp,
+            external_owner_ready: false,
+            external_owner_receipt: None,
             approval_chat_id: 900_000_003,
             approval_user_id: 900_000_004,
             approval_message_id: Some(339),
@@ -5574,6 +5600,7 @@ mod tests {
             automated_retry_count: 0,
             next_retry_at_unix: None,
             last_error_code: None,
+            last_error_message: None,
         }
     }
 

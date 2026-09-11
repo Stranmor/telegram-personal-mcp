@@ -13,9 +13,10 @@ use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 use telegram_personal_mcp::{
-    ApprovalBot, ApprovalPolicy, BotApiApprovalBot, Config, FakeTelegramBackend, FanoutApprovalBot,
-    LoginCodeOutcome, LoginRequestOutcome, MAX_MESSAGE_CACHE_AGE_DAYS, McpServer,
-    McpServerSettings, TelegramBackend, TelegramClient,
+    ApprovalBot, ApprovalPolicy, BotApiApprovalBot, Config, DEFAULT_MAX_DOWNLOAD_BYTES,
+    DEFAULT_MAX_UPLOAD_BYTES, FakeTelegramBackend, FanoutApprovalBot, LoginCodeOutcome,
+    LoginRequestOutcome, MAX_MESSAGE_CACHE_AGE_DAYS, McpServer, McpServerSettings, TelegramBackend,
+    TelegramClient,
     daemon::{
         DaemonConfigIdentity, DaemonPaths, connect_existing_matching, install_proxy_signal_ignores,
         prepare_mcp_daemon, proxy_stdio, run_mcp_daemon, wait_for_matching_socket,
@@ -41,13 +42,13 @@ struct Args {
     #[arg(
         long,
         env = "TELEGRAM_MCP_MAX_DOWNLOAD_BYTES",
-        default_value_t = 64 * 1024 * 1024
+        default_value_t = DEFAULT_MAX_DOWNLOAD_BYTES
     )]
     max_download_bytes: u64,
     #[arg(
         long,
         env = "TELEGRAM_MCP_MAX_UPLOAD_BYTES",
-        default_value_t = 64 * 1024 * 1024
+        default_value_t = DEFAULT_MAX_UPLOAD_BYTES
     )]
     max_upload_bytes: u64,
     #[arg(long, env = "TELEGRAM_MCP_STATE_DB")]

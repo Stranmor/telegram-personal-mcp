@@ -546,6 +546,7 @@ pub trait TelegramBackend: Send + Sync + 'static {
         session_path: Option<PathBuf>,
         chat_id: &str,
         text: &str,
+        parse_mode: CaptionParseMode,
         reply_to_message_id: Option<i32>,
         schedule_date_unix: i32,
         silent: bool,
@@ -575,6 +576,7 @@ pub trait TelegramBackend: Send + Sync + 'static {
         chat_id: &str,
         message_id: i32,
         text: &str,
+        parse_mode: CaptionParseMode,
         schedule_date_unix: i32,
     ) -> Result<(), TelegramError>;
 

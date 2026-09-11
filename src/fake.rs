@@ -2432,6 +2432,7 @@ impl FakeTelegramBackend {
                     user_id: 7,
                     first_name: "Fixture".to_string(),
                     username: Some("fixture_account".to_string()),
+                    premium: false,
                 },
                 account_is_bot: false,
                 account_profile: AccountProfileSummary {
@@ -6892,6 +6893,7 @@ impl TelegramBackend for FakeTelegramBackend {
         _session_path: Option<PathBuf>,
         chat_id: &str,
         text: &str,
+        parse_mode: CaptionParseMode,
         reply_to_message_id: Option<i32>,
         schedule_date_unix: i32,
         silent: bool,
@@ -6919,15 +6921,21 @@ impl TelegramBackend for FakeTelegramBackend {
         state.sent_by_random_id.insert(random_id, message_id);
         let account_user_id = state.account.user_id;
         let chat_ref = Self::canonical_chat_ref(&state.dialogs, canonical_id);
+        let rendered_text = match parse_mode {
+            CaptionParseMode::Plain => text.to_string(),
+            CaptionParseMode::Markdown => ferogram::InputMessage::markdown(text).text,
+            CaptionParseMode::Html => ferogram::InputMessage::html(text).text,
+            CaptionParseMode::RichMarkdown => String::new(),
+        };
         state.scheduled_messages.entry(canonical_id).or_default().push(MessageSummary {
             message_id,
-            chat_ref: Some(chat_ref),
+            chat_ref: Some(chat_ref.clone()),
             sender_ref: Some(account_user_id.to_string()),
             outgoing: true,
             pinned: false,
             silent,
             noforwards,
-            text: Some(text.to_string()),
+            text: (!matches!(parse_mode, CaptionParseMode::RichMarkdown)).then_some(rendered_text),
             date: schedule_date_unix,
             edit_date: None,
             reply_to_message_id,
@@ -6937,6 +6945,26 @@ impl TelegramBackend for FakeTelegramBackend {
             media_type: None,
             forward_origin: None,
         });
+        if matches!(parse_mode, CaptionParseMode::RichMarkdown) {
+            let normalized_text = crate::telegram::normalize_rich_markdown(text);
+            let block_count = ferogram::parsers::parse_rich_markdown(&normalized_text).len();
+            let mut state_hasher = Sha256::new();
+            state_hasher.update(b"fake-rich-message:v1\0");
+            state_hasher.update(text.as_bytes());
+            state.rich_messages.insert(
+                (canonical_id, message_id),
+                RichMessageSnapshot {
+                    chat_id: chat_ref,
+                    message_id,
+                    rtl: false,
+                    part: false,
+                    block_count,
+                    photo_count: 0,
+                    document_count: 0,
+                    state_sha256: format!("{:x}", state_hasher.finalize()),
+                },
+            );
+        }
         Ok(message_id)
     }
 
@@ -6955,6 +6983,12 @@ impl TelegramBackend for FakeTelegramBackend {
         mode: FileSendMode,
         random_id: i64,
     ) -> Result<i32, TelegramError> {
+        let is_rich = matches!(caption_parse_mode, CaptionParseMode::RichMarkdown);
+        if is_rich && !matches!(mode, FileSendMode::Auto | FileSendMode::Photo) {
+            return Err(TelegramError::InvalidPeer(
+                "native RichMessage media currently supports photo uploads only".to_string(),
+            ));
+        }
         let metadata = tokio::fs::metadata(file_path).await?;
         if !metadata.is_file() {
             return Err(TelegramError::Io(std::io::Error::new(
@@ -6966,6 +7000,11 @@ impl TelegramBackend for FakeTelegramBackend {
         let file_name =
             file_path.file_name().and_then(|value| value.to_str()).unwrap_or("attachment.bin");
         let mime = ferogram::media::detect_mime_from_bytes(&bytes, file_name);
+        if is_rich && (!mime.starts_with("image/") || mime == "image/gif") {
+            return Err(TelegramError::InvalidPeer(format!(
+                "native RichMessage media requires a static image; detected {mime}"
+            )));
+        }
         let media_type = match mode {
             FileSendMode::Photo => "photo",
             FileSendMode::Gif => {
@@ -6978,12 +7017,14 @@ impl TelegramBackend for FakeTelegramBackend {
             },
             FileSendMode::Document => "document",
             FileSendMode::Auto if mime.starts_with("video/") => "video",
+            FileSendMode::Auto if is_rich && mime.starts_with("image/") => "photo",
             FileSendMode::Auto => "document",
         };
         let rendered_caption = match caption_parse_mode {
             CaptionParseMode::Plain => caption.to_string(),
             CaptionParseMode::Markdown => ferogram::InputMessage::markdown(caption).text,
             CaptionParseMode::Html => ferogram::InputMessage::html(caption).text,
+            CaptionParseMode::RichMarkdown => String::new(),
         };
         let mut state = self.state.lock().await;
         if let Some(message_id) = state.sent_by_random_id.get(&random_id) {
@@ -7006,6 +7047,7 @@ impl TelegramBackend for FakeTelegramBackend {
         state.sent_by_random_id.insert(random_id, message_id);
         let account_user_id = state.account.user_id;
         let chat_ref = Self::canonical_chat_ref(&state.dialogs, canonical_id);
+        let rich_chat_ref = chat_ref.clone();
         state.scheduled_messages.entry(canonical_id).or_default().push(MessageSummary {
             message_id,
             chat_ref: Some(chat_ref),
@@ -7014,36 +7056,58 @@ impl TelegramBackend for FakeTelegramBackend {
             pinned: false,
             silent,
             noforwards,
-            text: Some(rendered_caption),
+            text: (!is_rich).then_some(rendered_caption),
             date: schedule_date_unix,
             edit_date: None,
             reply_to_message_id,
             views: None,
             forwards: None,
             reply_count: None,
-            media_type: Some(media_type.to_string()),
+            media_type: (!is_rich).then_some(media_type.to_string()),
             forward_origin: None,
         });
-        state.attachments.insert(
-            (canonical_id, message_id),
-            (
-                AttachmentDescriptor {
-                    attachment_id: format!("{chat_id}:{message_id}:0"),
-                    chat_id: chat_id.to_string(),
+        if is_rich {
+            let normalized_caption = crate::telegram::normalize_rich_markdown(caption);
+            let block_count = ferogram::parsers::parse_rich_markdown(&normalized_caption).len();
+            let mut state_hasher = Sha256::new();
+            state_hasher.update(b"fake-rich-file-message:v1\0");
+            state_hasher.update(caption.as_bytes());
+            state_hasher.update(&bytes);
+            state.rich_messages.insert(
+                (canonical_id, message_id),
+                RichMessageSnapshot {
+                    chat_id: rich_chat_ref,
                     message_id,
-                    kind: if media_type == "photo" {
-                        "photo".to_string()
-                    } else {
-                        "document".to_string()
-                    },
-                    file_name: Some(file_name.to_string()),
-                    mime_type: Some(mime),
-                    size_bytes: Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
-                    downloadable: true,
+                    rtl: false,
+                    part: false,
+                    block_count: block_count.saturating_add(1),
+                    photo_count: 1,
+                    document_count: 0,
+                    state_sha256: format!("{:x}", state_hasher.finalize()),
                 },
-                bytes,
-            ),
-        );
+            );
+        } else {
+            state.attachments.insert(
+                (canonical_id, message_id),
+                (
+                    AttachmentDescriptor {
+                        attachment_id: format!("{chat_id}:{message_id}:0"),
+                        chat_id: chat_id.to_string(),
+                        message_id,
+                        kind: if media_type == "photo" {
+                            "photo".to_string()
+                        } else {
+                            "document".to_string()
+                        },
+                        file_name: Some(file_name.to_string()),
+                        mime_type: Some(mime),
+                        size_bytes: Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
+                        downloadable: true,
+                    },
+                    bytes,
+                ),
+            );
+        }
         Ok(message_id)
     }
 
@@ -7053,11 +7117,19 @@ impl TelegramBackend for FakeTelegramBackend {
         chat_id: &str,
         message_id: i32,
         text: &str,
+        parse_mode: CaptionParseMode,
         schedule_date_unix: i32,
     ) -> Result<(), TelegramError> {
         let mut state = self.state.lock().await;
         let canonical_id = Self::resolve_dialog(&state.dialogs, chat_id)
             .ok_or_else(|| TelegramError::PeerNotFound(chat_id.to_string()))?;
+        let rendered_text = match parse_mode {
+            CaptionParseMode::Plain => text.to_string(),
+            CaptionParseMode::Markdown => ferogram::InputMessage::markdown(text).text,
+            CaptionParseMode::Html => ferogram::InputMessage::html(text).text,
+            CaptionParseMode::RichMarkdown => String::new(),
+        };
+        let is_rich = matches!(parse_mode, CaptionParseMode::RichMarkdown);
         let message = state
             .scheduled_messages
             .get_mut(&canonical_id)
@@ -7067,9 +7139,32 @@ impl TelegramBackend for FakeTelegramBackend {
             .ok_or_else(|| {
                 TelegramError::PeerNotFound(format!("scheduled message {message_id}"))
             })?;
-        message.text = Some(text.to_string());
+        message.text = (!is_rich).then_some(rendered_text);
         message.date = schedule_date_unix;
         message.edit_date = Some(1_700_000_000_i32.saturating_add(message_id));
+        let chat_ref = message.chat_ref.clone().unwrap_or_else(|| chat_id.to_string());
+        if is_rich {
+            let normalized_text = crate::telegram::normalize_rich_markdown(text);
+            let block_count = ferogram::parsers::parse_rich_markdown(&normalized_text).len();
+            let mut state_hasher = Sha256::new();
+            state_hasher.update(b"fake-rich-message:v1\0");
+            state_hasher.update(text.as_bytes());
+            state.rich_messages.insert(
+                (canonical_id, message_id),
+                RichMessageSnapshot {
+                    chat_id: chat_ref,
+                    message_id,
+                    rtl: false,
+                    part: false,
+                    block_count,
+                    photo_count: 0,
+                    document_count: 0,
+                    state_sha256: format!("{:x}", state_hasher.finalize()),
+                },
+            );
+        } else {
+            state.rich_messages.remove(&(canonical_id, message_id));
+        }
         state.schedule_edit_calls = state.schedule_edit_calls.saturating_add(1);
         Ok(())
     }
@@ -11782,6 +11877,11 @@ impl TelegramBackend for FakeTelegramBackend {
         noforwards: bool,
         random_id: i64,
     ) -> Result<i32, TelegramError> {
+        if matches!(caption_parse_mode, CaptionParseMode::RichMarkdown) {
+            return Err(TelegramError::InvalidPeer(
+                "media does not support native RichMessage captions".to_string(),
+            ));
+        }
         let metadata = tokio::fs::metadata(file_path).await?;
         if !metadata.is_file() {
             return Err(TelegramError::Io(std::io::Error::new(
@@ -11795,6 +11895,7 @@ impl TelegramBackend for FakeTelegramBackend {
             CaptionParseMode::Plain => caption.to_string(),
             CaptionParseMode::Markdown => ferogram::InputMessage::markdown(caption).text,
             CaptionParseMode::Html => ferogram::InputMessage::html(caption).text,
+            CaptionParseMode::RichMarkdown => String::new(),
         };
         let mut state = self.state.lock().await;
         if let Some(message_id) = state.sent_by_random_id.get(&random_id) {
@@ -11996,6 +12097,11 @@ impl TelegramBackend for FakeTelegramBackend {
         noforwards: bool,
         random_ids: &[i64],
     ) -> Result<Vec<i32>, TelegramError> {
+        if matches!(caption_parse_mode, CaptionParseMode::RichMarkdown) {
+            return Err(TelegramError::InvalidPeer(
+                "album does not support native RichMessage captions".to_string(),
+            ));
+        }
         if !(2..=10).contains(&items.len()) || items.len() != random_ids.len() {
             return Err(TelegramError::InvalidPeer(
                 "album requires 2-10 items and one random id per item".to_string(),
@@ -12060,6 +12166,7 @@ impl TelegramBackend for FakeTelegramBackend {
                 CaptionParseMode::Plain => item.caption.clone(),
                 CaptionParseMode::Markdown => ferogram::InputMessage::markdown(&item.caption).text,
                 CaptionParseMode::Html => ferogram::InputMessage::html(&item.caption).text,
+                CaptionParseMode::RichMarkdown => String::new(),
             };
             state.sent.push(FakeSentMessage {
                 chat_id: canonical_id.to_string(),
@@ -12380,7 +12487,9 @@ impl TelegramBackend for FakeTelegramBackend {
                 forward_origin: None,
             },
         );
-        let block_count = markdown.lines().filter(|line| !line.trim().is_empty()).count().max(1);
+        let normalized_markdown = crate::telegram::normalize_rich_markdown(markdown);
+        let block_count =
+            normalized_markdown.lines().filter(|line| !line.trim().is_empty()).count().max(1);
         let mut state_hasher = Sha256::new();
         state_hasher.update(b"fake-rich-message:v1\0");
         state_hasher.update(markdown.as_bytes());

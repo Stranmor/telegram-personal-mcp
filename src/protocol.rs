@@ -8,6 +8,7 @@ pub struct ToolFailure {
     pub message: String,
     pub retryable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::opt_non_negative_integer_schema")]
     pub retry_after_seconds: Option<u64>,
 }
 

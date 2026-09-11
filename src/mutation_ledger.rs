@@ -14,7 +14,8 @@
 use crate::domain::{
     AccountEmojiStatusSpec, AudioTranscriptionSummary, ChatMemberSummary, InviteBatchProgress,
     InviteConfirmation, InviteTargetProgress, InviteTargetState, MutationAction, MutationApproval,
-    MutationApprovalState, MutationResult, PreparedMutation, PreparedMutationState,
+    MutationApprovalState, MutationExecutionOwner, MutationResult, PreparedMutation,
+    PreparedMutationState,
 };
 use crate::ledger::open_state_connection;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -62,12 +63,27 @@ impl MutationLedger {
         action: MutationAction,
         payload_sha256: String,
     ) -> rusqlite::Result<PreparedMutationRecord> {
+        self.prepare_with_id(Uuid::new_v4().to_string(), account_user_id, action, payload_sha256)
+    }
+
+    pub fn prepare_with_id(
+        &self,
+        mutation_id: String,
+        account_user_id: i64,
+        action: MutationAction,
+        payload_sha256: String,
+    ) -> rusqlite::Result<PreparedMutationRecord> {
+        let parsed_id = Uuid::parse_str(&mutation_id).map_err(|_| {
+            state_error("prepared mutation id must be a canonical UUID".to_string())
+        })?;
+        if parsed_id.to_string() != mutation_id {
+            return Err(state_error("prepared mutation id must be a canonical UUID".to_string()));
+        }
         let connection = self.connection()?;
-        let mutation_id = Uuid::new_v4().to_string();
         let action_json = serde_json::to_string(&action).map_err(json_to_sql)?;
         let created_at = now_unix();
         connection.execute(
-            "INSERT INTO prepared_mutations (
+            "INSERT OR IGNORE INTO prepared_mutations (
                 mutation_id, schema_version, account_user_id, action_json,
                 payload_sha256, state, result_json, created_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, 'prepared', NULL, ?6)",
@@ -80,7 +96,17 @@ impl MutationLedger {
                 created_at,
             ],
         )?;
-        self.get(&mutation_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+        let prepared = self.get(&mutation_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if prepared.public.account_user_id != account_user_id
+            || prepared.public.payload_sha256 != payload_sha256
+            || prepared.action_json != action_json
+        {
+            return Err(state_error(
+                "prepared mutation id is already bound to a different immutable payload"
+                    .to_string(),
+            ));
+        }
+        Ok(prepared)
     }
 
     pub fn prepare_invite_batch(
@@ -597,6 +623,43 @@ impl MutationLedger {
         approval_user_id: i64,
         ttl_seconds: u64,
     ) -> rusqlite::Result<MutationApprovalRequestRecord> {
+        self.create_or_get_approval_with_owner(
+            mutation_id,
+            payload_sha256,
+            approval_chat_id,
+            approval_user_id,
+            ttl_seconds,
+            MutationExecutionOwner::ManagedMcp,
+        )
+    }
+
+    pub fn create_or_get_external_owner_approval(
+        &self,
+        mutation_id: &str,
+        payload_sha256: &str,
+        approval_chat_id: i64,
+        approval_user_id: i64,
+        ttl_seconds: u64,
+    ) -> rusqlite::Result<MutationApprovalRequestRecord> {
+        self.create_or_get_approval_with_owner(
+            mutation_id,
+            payload_sha256,
+            approval_chat_id,
+            approval_user_id,
+            ttl_seconds,
+            MutationExecutionOwner::ExternalOwner,
+        )
+    }
+
+    fn create_or_get_approval_with_owner(
+        &self,
+        mutation_id: &str,
+        payload_sha256: &str,
+        approval_chat_id: i64,
+        approval_user_id: i64,
+        ttl_seconds: u64,
+        execution_owner: MutationExecutionOwner,
+    ) -> rusqlite::Result<MutationApprovalRequestRecord> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = now_unix();
@@ -609,6 +672,12 @@ impl MutationLedger {
             ));
         }
         if let Some(existing) = get_latest_reusable_approval(&transaction, mutation_id)? {
+            if existing.execution_owner != execution_owner {
+                return Err(state_error(format!(
+                    "mutation {mutation_id} already has an approval owned by {:?}",
+                    existing.execution_owner
+                )));
+            }
             transaction.commit()?;
             return Ok(MutationApprovalRequestRecord {
                 public: existing,
@@ -628,10 +697,10 @@ impl MutationLedger {
                 approval_id, mutation_id, payload_sha256, state,
                 approval_chat_id, approval_user_id, bot_message_id,
                 created_at, expires_at, decided_at,
-                automated_retry_count, next_retry_at, last_error_code
+                automated_retry_count, next_retry_at, last_error_code, last_error_message
              ) VALUES (
                 ?1, ?2, ?3, 'dispatching_card', ?4, ?5, NULL,
-                ?6, ?7, NULL, 0, NULL, NULL
+                ?6, ?7, NULL, 0, NULL, NULL, NULL
              )",
             params![
                 approval_id,
@@ -645,6 +714,12 @@ impl MutationLedger {
         );
         if let Err(error) = insert {
             if let Some(existing) = get_latest_reusable_approval(&transaction, mutation_id)? {
+                if existing.execution_owner != execution_owner {
+                    return Err(state_error(format!(
+                        "mutation {mutation_id} already has an approval owned by {:?}",
+                        existing.execution_owner
+                    )));
+                }
                 transaction.commit()?;
                 return Ok(MutationApprovalRequestRecord {
                     public: existing,
@@ -653,10 +728,238 @@ impl MutationLedger {
             }
             return Err(error);
         }
+        if execution_owner == MutationExecutionOwner::ExternalOwner {
+            transaction.execute(
+                "INSERT INTO mutation_external_handoffs (
+                    approval_id, receipt, approved_at, consumed_at
+                 ) VALUES (?1, ?2, NULL, NULL)",
+                params![approval_id, Uuid::new_v4().to_string()],
+            )?;
+        }
         let approval = get_approval_from_connection(&transaction, &approval_id)?
             .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         transaction.commit()?;
         Ok(MutationApprovalRequestRecord { public: approval, should_dispatch_card: true })
+    }
+
+    pub fn mark_external_owner_approved(
+        &self,
+        approval_id: &str,
+        now: i64,
+    ) -> rusqlite::Result<bool> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE mutation_external_handoffs
+             SET approved_at = COALESCE(approved_at, ?2)
+             WHERE approval_id = ?1
+               AND approved_at IS NULL
+               AND consumed_at IS NULL
+               AND EXISTS (
+                   SELECT 1
+                   FROM mutation_approvals
+                   WHERE approval_id = ?1
+                     AND state = 'pending'
+                     AND expires_at > ?2
+               )",
+            params![approval_id, now],
+        )?;
+        if changed > 0 {
+            transaction.execute(
+                "UPDATE mutation_approvals
+                 SET decided_at = COALESCE(decided_at, ?2),
+                     next_retry_at = NULL,
+                     last_error_code = NULL
+                 WHERE approval_id = ?1 AND state = 'pending'",
+                params![approval_id, now],
+            )?;
+        }
+        let ready = transaction.query_row(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM mutation_external_handoffs h
+                 JOIN mutation_approvals a ON a.approval_id = h.approval_id
+                 WHERE h.approval_id = ?1
+                   AND h.approved_at IS NOT NULL
+                   AND h.consumed_at IS NULL
+                   AND a.state = 'pending'
+             )",
+            [approval_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        transaction.commit()?;
+        Ok(changed > 0 || ready)
+    }
+
+    pub fn start_external_owner_scheduled_approval(
+        &self,
+        mutation_id: &str,
+        payload_sha256: &str,
+        approval_id: &str,
+        external_owner_receipt: &str,
+    ) -> rusqlite::Result<MutationApproval> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = now_unix();
+        expire_due_approvals(&transaction, now)?;
+        let prepared = get_mutation_from_connection(&transaction, mutation_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if prepared.public.payload_sha256 != payload_sha256 {
+            return Err(state_error(
+                "external-owner payload hash does not match the prepared mutation".to_string(),
+            ));
+        }
+        let schedule_deadline = mutation_action_approval_deadline_unix(&prepared.public.action)
+            .ok_or_else(|| {
+                state_error(
+                    "external-owner application is only legal for scheduled mutations".to_string(),
+                )
+            })?;
+        if schedule_deadline <= now {
+            return Err(state_error(
+                "scheduled delivery time elapsed before external-owner application".to_string(),
+            ));
+        }
+        let approval = get_approval_from_connection(&transaction, approval_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if approval.mutation_id != mutation_id
+            || approval.payload_sha256 != payload_sha256
+            || approval.execution_owner != MutationExecutionOwner::ExternalOwner
+            || !approval.external_owner_ready
+            || approval.external_owner_receipt.as_deref() != Some(external_owner_receipt)
+        {
+            return Err(state_error(
+                "external-owner approval receipt is not bound to the exact ready mutation"
+                    .to_string(),
+            ));
+        }
+        let changed = transaction.execute(
+            "UPDATE mutation_approvals
+             SET state = 'applying', next_retry_at = ?2,
+                 last_error_code = NULL, last_error_message = NULL
+             WHERE approval_id = ?1
+               AND state = 'pending'
+               AND expires_at > ?2",
+            params![approval_id, now],
+        )?;
+        if changed != 1 {
+            return Err(state_error("external-owner approval is no longer claimable".to_string()));
+        }
+        let consumed = transaction.execute(
+            "UPDATE mutation_external_handoffs
+             SET consumed_at = ?2
+             WHERE approval_id = ?1
+               AND approved_at IS NOT NULL
+               AND consumed_at IS NULL
+               AND receipt = ?3",
+            params![approval_id, now, external_owner_receipt],
+        )?;
+        if consumed != 1 {
+            return Err(state_error(
+                "external-owner approval receipt was already consumed".to_string(),
+            ));
+        }
+        transaction.execute(
+            "UPDATE prepared_mutations
+             SET state = 'applying'
+             WHERE mutation_id = ?1 AND state != 'applied'",
+            [mutation_id],
+        )?;
+        let approval = get_approval_from_connection(&transaction, approval_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        transaction.commit()?;
+        Ok(approval)
+    }
+
+    /// Starts one exact already-prepared scheduled mutation under explicit
+    /// current-session authority without creating an operator-bot card.
+    ///
+    /// This transition is deliberately narrow: it does not reuse a card-bound
+    /// approval, and an interrupted/unknown direct application stays unresolved
+    /// instead of being replayed automatically.
+    pub fn start_current_session_scheduled_approval(
+        &self,
+        mutation_id: &str,
+        payload_sha256: &str,
+        approval_chat_id: i64,
+        approval_user_id: i64,
+    ) -> rusqlite::Result<MutationApproval> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = now_unix();
+        expire_due_approvals(&transaction, now)?;
+        let prepared = get_mutation_from_connection(&transaction, mutation_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if prepared.public.payload_sha256 != payload_sha256 {
+            return Err(state_error(
+                "current-session payload hash does not match the prepared mutation".to_string(),
+            ));
+        }
+        let schedule_deadline = mutation_action_approval_deadline_unix(&prepared.public.action)
+            .ok_or_else(|| {
+                state_error(
+                    "current-session direct application is only legal for scheduled mutations"
+                        .to_string(),
+                )
+            })?;
+        if schedule_deadline <= now {
+            return Err(state_error(
+                "scheduled delivery time elapsed before current-session application".to_string(),
+            ));
+        }
+        if let Some(existing) = get_latest_reusable_approval(&transaction, mutation_id)? {
+            transaction.commit()?;
+            if existing.approval_message_id.is_some() {
+                return Err(state_error(
+                    "prepared mutation already has a card-bound approval and cannot bypass it"
+                        .to_string(),
+                ));
+            }
+            return match existing.state {
+                MutationApprovalState::Applied => Ok(existing),
+                MutationApprovalState::Applying | MutationApprovalState::OutcomeUnknown => {
+                    Err(state_error(
+                        "current-session scheduled mutation has an unresolved provider outcome and will not be replayed"
+                            .to_string(),
+                    ))
+                },
+                state => Err(state_error(format!(
+                    "current-session scheduled mutation has incompatible existing approval state {state:?}"
+                ))),
+            };
+        }
+
+        let approval_id = Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT INTO mutation_approvals (
+                approval_id, mutation_id, payload_sha256, state,
+                approval_chat_id, approval_user_id, bot_message_id,
+                created_at, expires_at, decided_at,
+                automated_retry_count, next_retry_at, last_error_code, last_error_message
+             ) VALUES (
+                ?1, ?2, ?3, 'applying', ?4, ?5, NULL,
+                ?6, ?7, ?6, 0, NULL, NULL, NULL
+             )",
+            params![
+                approval_id,
+                mutation_id,
+                payload_sha256,
+                approval_chat_id,
+                approval_user_id,
+                now,
+                schedule_deadline,
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE prepared_mutations
+             SET state = 'applying'
+             WHERE mutation_id = ?1 AND state != 'applied'",
+            [mutation_id],
+        )?;
+        let approval = get_approval_from_connection(&transaction, &approval_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        transaction.commit()?;
+        Ok(approval)
     }
 
     pub fn get_approval(&self, approval_id: &str) -> rusqlite::Result<Option<MutationApproval>> {
@@ -757,10 +1060,15 @@ impl MutationLedger {
         let changed = transaction.execute(
             "UPDATE mutation_approvals
              SET state = 'applying', decided_at = COALESCE(decided_at, ?2),
-                 next_retry_at = ?2, last_error_code = NULL
-             WHERE approval_id = ?1
-               AND state = 'pending'
-               AND expires_at > ?2",
+                 next_retry_at = ?2, last_error_code = NULL,
+                 last_error_message = NULL
+            WHERE approval_id = ?1
+              AND state = 'pending'
+              AND NOT EXISTS (
+                  SELECT 1 FROM mutation_external_handoffs
+                  WHERE approval_id = ?1
+              )
+              AND expires_at > ?2",
             params![approval_id, now],
         )?;
         if changed > 0 {
@@ -790,8 +1098,14 @@ impl MutationLedger {
             "UPDATE mutation_approvals
              SET state = 'cancelled', decided_at = COALESCE(decided_at, ?2),
                  next_retry_at = NULL, last_error_code = NULL
-             WHERE approval_id = ?1
+            WHERE approval_id = ?1
                AND state = 'pending'
+               AND NOT EXISTS (
+                   SELECT 1 FROM mutation_external_handoffs
+                   WHERE approval_id = ?1
+                     AND approved_at IS NOT NULL
+                     AND consumed_at IS NULL
+               )
                AND expires_at > ?2",
             params![approval_id, now],
         )?;
@@ -872,7 +1186,8 @@ impl MutationLedger {
         )?;
         transaction.execute(
             "UPDATE mutation_approvals
-             SET state = 'applied', next_retry_at = NULL, last_error_code = NULL
+             SET state = 'applied', next_retry_at = NULL,
+                 last_error_code = NULL, last_error_message = NULL
              WHERE approval_id = ?1",
             [approval_id],
         )?;
@@ -899,7 +1214,8 @@ impl MutationLedger {
             "UPDATE mutation_approvals
              SET state = 'outcome_unknown',
                  automated_retry_count = automated_retry_count + 1,
-                 next_retry_at = ?3, last_error_code = ?2
+                 next_retry_at = ?3, last_error_code = ?2,
+                 last_error_message = NULL
              WHERE approval_id = ?1 AND state IN ('applying', 'outcome_unknown')",
             params![approval_id, error_code, next_retry_at],
         )?;
@@ -954,6 +1270,21 @@ impl MutationLedger {
         transaction.commit()
     }
 
+    pub fn set_last_error_message(
+        &self,
+        approval_id: &str,
+        message: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let connection = self.connection()?;
+        let changed = connection.execute(
+            "UPDATE mutation_approvals
+             SET last_error_message = ?2
+             WHERE approval_id = ?1",
+            params![approval_id, message],
+        )?;
+        require_approval_existing_or_changed(&connection, approval_id, changed)
+    }
+
     pub fn mark_retryable_failure(
         &self,
         approval_id: &str,
@@ -974,7 +1305,8 @@ impl MutationLedger {
             "UPDATE mutation_approvals
              SET state = 'applying',
                  automated_retry_count = automated_retry_count + 1,
-                 next_retry_at = ?3, last_error_code = ?2
+                 next_retry_at = ?3, last_error_code = ?2,
+                 last_error_message = NULL
              WHERE approval_id = ?1 AND state IN ('applying', 'outcome_unknown')",
             params![approval_id, error_code, next_retry_at],
         )?;
@@ -1008,7 +1340,8 @@ impl MutationLedger {
         };
         let changed = transaction.execute(
             "UPDATE mutation_approvals
-             SET state = 'applying', next_retry_at = ?2
+             SET state = 'applying', next_retry_at = ?2,
+                 last_error_message = NULL
              WHERE approval_id = ?1
                AND state = 'outcome_unknown'
                AND next_retry_at IS NOT NULL
@@ -1047,9 +1380,12 @@ impl MutationLedger {
                     p.account_user_id, p.action_json, a.payload_sha256, a.state,
                     a.approval_chat_id, a.approval_user_id, a.bot_message_id,
                     a.created_at, a.expires_at, p.result_json,
-                    a.automated_retry_count, a.next_retry_at, a.last_error_code
+                    a.automated_retry_count, a.next_retry_at, a.last_error_code,
+                    a.last_error_message,
+                    h.receipt, h.approved_at, h.consumed_at
              FROM mutation_approvals a
              JOIN prepared_mutations p ON p.mutation_id = a.mutation_id
+             LEFT JOIN mutation_external_handoffs h ON h.approval_id = a.approval_id
              WHERE a.state IN ('applying', 'outcome_unknown')
                AND a.next_retry_at IS NOT NULL
                AND a.next_retry_at <= ?1
@@ -1078,7 +1414,7 @@ impl MutationLedger {
                    AND (
                        a.expires_at <= ?1
                        OR (
-                           json_extract(p.action_json, '$.kind') IN ('schedule_message', 'schedule_file')
+                           json_extract(p.action_json, '$.kind') IN ('schedule_message', 'schedule_file', 'edit_scheduled_message')
                            AND CAST(json_extract(p.action_json, '$.schedule_date_unix') AS INTEGER)
                                != 2147483646
                            AND CAST(json_extract(p.action_json, '$.schedule_date_unix') AS INTEGER)
@@ -1088,7 +1424,7 @@ impl MutationLedger {
                  ORDER BY MIN(
                      a.expires_at,
                      CASE
-                         WHEN json_extract(p.action_json, '$.kind') IN ('schedule_message', 'schedule_file')
+                         WHEN json_extract(p.action_json, '$.kind') IN ('schedule_message', 'schedule_file', 'edit_scheduled_message')
                          THEN CAST(json_extract(p.action_json, '$.schedule_date_unix') AS INTEGER)
                          ELSE a.expires_at
                      END
@@ -1109,6 +1445,7 @@ impl MutationLedger {
                 current.action,
                 MutationAction::ScheduleMessage { schedule_date_unix, .. }
                 | MutationAction::ScheduleFile { schedule_date_unix, .. }
+                | MutationAction::EditScheduledMessage { schedule_date_unix, .. }
                     if schedule_date_unix != 0x7fff_fffe
                         && i64::from(schedule_date_unix) <= now
             );
@@ -1163,7 +1500,16 @@ impl MutationLedger {
                  decided_at INTEGER,
                  automated_retry_count INTEGER NOT NULL DEFAULT 0,
                  next_retry_at INTEGER,
-                 last_error_code TEXT
+                 last_error_code TEXT,
+                 last_error_message TEXT
+             );
+             CREATE TABLE IF NOT EXISTS mutation_external_handoffs (
+                 approval_id TEXT PRIMARY KEY REFERENCES mutation_approvals(approval_id),
+                 receipt TEXT NOT NULL UNIQUE,
+                 approved_at INTEGER,
+                 consumed_at INTEGER,
+                 CHECK (approved_at IS NULL OR approved_at > 0),
+                 CHECK (consumed_at IS NULL OR consumed_at > 0)
              );
              CREATE TABLE IF NOT EXISTS mutation_invite_targets (
                  mutation_id TEXT NOT NULL REFERENCES prepared_mutations(mutation_id),
@@ -1198,6 +1544,23 @@ impl MutationLedger {
                  'applying', 'outcome_unknown'
              );",
         )?;
+        let has_last_error_message = {
+            let mut statement = connection.prepare("PRAGMA table_info(mutation_approvals)")?;
+            let mut rows = statement.query([])?;
+            let mut found = false;
+            while let Some(row) = rows.next()? {
+                let column_name: String = row.get(1)?;
+                if column_name == "last_error_message" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_last_error_message {
+            connection
+                .execute("ALTER TABLE mutation_approvals ADD COLUMN last_error_message TEXT", [])?;
+        }
         Ok(connection)
     }
 }
@@ -1405,9 +1768,12 @@ fn get_approval_from_connection(
                     p.account_user_id, p.action_json, a.payload_sha256, a.state,
                     a.approval_chat_id, a.approval_user_id, a.bot_message_id,
                     a.created_at, a.expires_at, p.result_json,
-                    a.automated_retry_count, a.next_retry_at, a.last_error_code
+                    a.automated_retry_count, a.next_retry_at, a.last_error_code,
+                    a.last_error_message,
+                    h.receipt, h.approved_at, h.consumed_at
              FROM mutation_approvals a
              JOIN prepared_mutations p ON p.mutation_id = a.mutation_id
+             LEFT JOIN mutation_external_handoffs h ON h.approval_id = a.approval_id
              WHERE a.approval_id = ?1",
             [approval_id],
             map_approval_row,
@@ -1425,9 +1791,12 @@ fn get_latest_reusable_approval(
                     p.account_user_id, p.action_json, a.payload_sha256, a.state,
                     a.approval_chat_id, a.approval_user_id, a.bot_message_id,
                     a.created_at, a.expires_at, p.result_json,
-                    a.automated_retry_count, a.next_retry_at, a.last_error_code
+                    a.automated_retry_count, a.next_retry_at, a.last_error_code,
+                    a.last_error_message,
+                    h.receipt, h.approved_at, h.consumed_at
              FROM mutation_approvals a
              JOIN prepared_mutations p ON p.mutation_id = a.mutation_id
+             LEFT JOIN mutation_external_handoffs h ON h.approval_id = a.approval_id
              WHERE a.mutation_id = ?1
                AND a.state IN (
                    'dispatching_card', 'pending', 'card_delivery_uncertain',
@@ -1447,6 +1816,18 @@ fn map_approval_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MutationApprova
     let state: String = row.get(6)?;
     let result_json: Option<String> = row.get(12)?;
     let retry_count: i64 = row.get(13)?;
+    let external_owner_receipt: Option<String> = row.get(17)?;
+    let external_owner_approved_at: Option<i64> = row.get(18)?;
+    let external_owner_consumed_at: Option<i64> = row.get(19)?;
+    let execution_owner = if external_owner_receipt.is_some() {
+        MutationExecutionOwner::ExternalOwner
+    } else {
+        MutationExecutionOwner::ManagedMcp
+    };
+    let external_owner_ready = execution_owner == MutationExecutionOwner::ExternalOwner
+        && state == "pending"
+        && external_owner_approved_at.is_some()
+        && external_owner_consumed_at.is_none();
     Ok(MutationApproval {
         approval_id: row.get(0)?,
         mutation_id: row.get(1)?,
@@ -1457,6 +1838,12 @@ fn map_approval_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MutationApprova
         action: serde_json::from_str(&action_json).map_err(|error| json_from_sql(4, error))?,
         payload_sha256: row.get(5)?,
         state: parse_approval_state(&state)?,
+        execution_owner,
+        external_owner_ready,
+        // The one-shot handoff receipt is a capability, not ordinary status.
+        // Keep it hidden until the operator callback has made the exact
+        // external-owner handoff ready, and hide it again once consumed.
+        external_owner_receipt: external_owner_ready.then_some(external_owner_receipt).flatten(),
         approval_chat_id: row.get(7)?,
         approval_user_id: row.get(8)?,
         approval_message_id: row.get(9)?,
@@ -1470,6 +1857,7 @@ fn map_approval_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MutationApprova
         })?,
         next_retry_at_unix: row.get(14)?,
         last_error_code: row.get(15)?,
+        last_error_message: row.get(16)?,
     })
 }
 
@@ -1635,6 +2023,7 @@ fn mutation_action_approval_deadline_unix(action: &MutationAction) -> Option<i64
     match action {
         MutationAction::ScheduleMessage { schedule_date_unix, .. }
         | MutationAction::ScheduleFile { schedule_date_unix, .. }
+        | MutationAction::EditScheduledMessage { schedule_date_unix, .. }
             if *schedule_date_unix != 0x7fff_fffe =>
         {
             Some(i64::from(*schedule_date_unix))
@@ -1731,6 +2120,7 @@ mod tests {
             target: None,
             source: None,
             text: "Scheduled text".to_string(),
+            parse_mode: crate::domain::CaptionParseMode::Plain,
             reply_to: None,
             schedule_date_unix: i32::try_from(now.saturating_sub(1)).expect("test timestamp"),
             silent: false,
@@ -1748,6 +2138,227 @@ mod tests {
         assert_eq!(expired[0].state, MutationApprovalState::Expired);
         assert_eq!(expired[0].last_error_code.as_deref(), Some("SCHEDULE_TIME_ELAPSED"));
         assert!(expired[0].expires_at_unix <= now);
+    }
+
+    #[test]
+    fn current_session_schedule_starts_once_without_card_and_never_reopens_unknown_outcome() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ledger = MutationLedger::new(temp.path().join("state.sqlite"));
+        let schedule_date_unix =
+            i32::try_from(now_unix().saturating_add(3_600)).expect("test timestamp");
+        let action = MutationAction::ScheduleMessage {
+            chat_id: "101".to_string(),
+            target: None,
+            source: None,
+            text: "Scheduled text".to_string(),
+            parse_mode: crate::domain::CaptionParseMode::Html,
+            reply_to: None,
+            schedule_date_unix,
+            silent: false,
+            noforwards: false,
+            random_id: 42,
+        };
+        let prepared = ledger.prepare(7, action, "schedule-hash".to_string()).expect("prepare");
+        let applying = ledger
+            .start_current_session_scheduled_approval(
+                &prepared.public.mutation_id,
+                "schedule-hash",
+                700,
+                700,
+            )
+            .expect("start current-session approval");
+        assert_eq!(applying.state, MutationApprovalState::Applying);
+        assert_eq!(applying.approval_message_id, None);
+
+        ledger
+            .mark_outcome_unknown(&applying.approval_id, "DELIVERY_UNCERTAIN", None)
+            .expect("record unknown outcome");
+        assert!(
+            ledger
+                .start_current_session_scheduled_approval(
+                    &prepared.public.mutation_id,
+                    "schedule-hash",
+                    700,
+                    700,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn scheduled_file_failure_preserves_exact_provider_message() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        let ledger = MutationLedger::new(path.clone());
+        let schedule_date_unix =
+            i32::try_from(now_unix().saturating_add(3_600)).expect("test timestamp");
+        let action = MutationAction::ScheduleFile {
+            chat_id: "-100101".to_string(),
+            target: None,
+            source: None,
+            artifact: crate::domain::MutationFileArtifact {
+                artifact_id: "0aeb30a5-4c58-4bb4-8ab4-e357873251e7".to_string(),
+                file_name: "visual.jpg".to_string(),
+                size_bytes: 42,
+                sha256: "media-sha256".to_string(),
+            },
+            caption: "Exact caption".to_string(),
+            caption_parse_mode: crate::domain::CaptionParseMode::Plain,
+            reply_to: None,
+            schedule_date_unix,
+            silent: false,
+            noforwards: false,
+            mode: crate::domain::FileSendMode::Photo,
+            random_id: 43,
+        };
+        let prepared =
+            ledger.prepare(7, action, "schedule-file-hash".to_string()).expect("prepare");
+        let applying = ledger
+            .start_current_session_scheduled_approval(
+                &prepared.public.mutation_id,
+                "schedule-file-hash",
+                700,
+                700,
+            )
+            .expect("start current-session approval");
+        ledger
+            .mark_known_failure(&applying.approval_id, "TELEGRAM_API_ERROR", now_unix())
+            .expect("record failure");
+        ledger
+            .set_last_error_message(
+                &applying.approval_id,
+                Some("Telegram API error: PHOTO_INVALID_DIMENSIONS"),
+            )
+            .expect("record provider detail");
+
+        let failed = MutationLedger::new(path)
+            .get_approval(&applying.approval_id)
+            .expect("read approval")
+            .expect("approval");
+        assert_eq!(failed.state, MutationApprovalState::Failed);
+        assert_eq!(failed.last_error_code.as_deref(), Some("TELEGRAM_API_ERROR"));
+        assert_eq!(
+            failed.last_error_message.as_deref(),
+            Some("Telegram API error: PHOTO_INVALID_DIMENSIONS")
+        );
+    }
+
+    #[test]
+    fn external_owner_schedule_handoff_is_one_shot_and_not_managed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ledger = MutationLedger::new(temp.path().join("state.sqlite"));
+        let schedule_date_unix =
+            i32::try_from(now_unix().saturating_add(3_600)).expect("test timestamp");
+        let action = MutationAction::ScheduleMessage {
+            chat_id: "101".to_string(),
+            target: None,
+            source: None,
+            text: "Scheduled text".to_string(),
+            parse_mode: crate::domain::CaptionParseMode::Plain,
+            reply_to: None,
+            schedule_date_unix,
+            silent: false,
+            noforwards: false,
+            random_id: 42,
+        };
+        let prepared = ledger.prepare(7, action, "schedule-hash".to_string()).expect("prepare");
+        let requested = ledger
+            .create_or_get_external_owner_approval(
+                &prepared.public.mutation_id,
+                "schedule-hash",
+                700,
+                700,
+                3_600,
+            )
+            .expect("external-owner approval");
+        assert_eq!(requested.public.execution_owner, MutationExecutionOwner::ExternalOwner);
+        assert!(!requested.public.external_owner_ready);
+        assert!(requested.public.external_owner_receipt.is_none());
+        ledger.mark_approval_card_delivered(&requested.public.approval_id, 55).expect("card");
+
+        assert!(
+            !ledger
+                .mark_approval_applying(&requested.public.approval_id, now_unix())
+                .expect("managed path remains closed")
+        );
+        assert!(
+            ledger
+                .mark_external_owner_approved(&requested.public.approval_id, now_unix())
+                .expect("operator approval")
+        );
+        let ready = ledger
+            .get_approval(&requested.public.approval_id)
+            .expect("get ready approval")
+            .expect("ready approval");
+        assert!(ready.external_owner_ready);
+        let receipt = ready.external_owner_receipt.clone().expect("ready receipt");
+        assert!(
+            ledger
+                .mark_external_owner_approved(&requested.public.approval_id, now_unix())
+                .expect("duplicate operator callback is idempotent")
+        );
+        assert!(
+            !ledger
+                .mark_approval_applying(&requested.public.approval_id, now_unix())
+                .expect("managed path remains closed after approval")
+        );
+
+        let applying = ledger
+            .start_external_owner_scheduled_approval(
+                &prepared.public.mutation_id,
+                "schedule-hash",
+                &requested.public.approval_id,
+                &receipt,
+            )
+            .expect("external owner starts exact scheduled mutation");
+        assert_eq!(applying.state, MutationApprovalState::Applying);
+        assert!(!applying.external_owner_ready);
+        assert!(
+            ledger
+                .start_external_owner_scheduled_approval(
+                    &prepared.public.mutation_id,
+                    "schedule-hash",
+                    &requested.public.approval_id,
+                    &receipt,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn caller_owned_mutation_id_replays_only_the_exact_immutable_record() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ledger = MutationLedger::new(temp.path().join("state.sqlite"));
+        let action = MutationAction::ScheduleMessage {
+            chat_id: "101".to_string(),
+            target: None,
+            source: None,
+            text: "Scheduled text".to_string(),
+            parse_mode: crate::domain::CaptionParseMode::Plain,
+            reply_to: None,
+            schedule_date_unix: now_unix().saturating_add(3_600).try_into().expect("timestamp"),
+            silent: false,
+            noforwards: false,
+            random_id: 42,
+        };
+        let mutation_id = "018f6f7c-7c20-7e9f-9b35-1c7d6db3d2c1".to_string();
+        let first = ledger
+            .prepare_with_id(mutation_id.clone(), 7, action.clone(), "schedule-hash".to_string())
+            .expect("first prepare");
+        let replay = ledger
+            .prepare_with_id(mutation_id, 7, action, "schedule-hash".to_string())
+            .expect("exact replay");
+        assert_eq!(first.public.mutation_id, replay.public.mutation_id);
+        assert!(
+            ledger
+                .prepare_with_id(
+                    first.public.mutation_id,
+                    7,
+                    replay.public.action,
+                    "different-hash".to_string(),
+                )
+                .is_err()
+        );
     }
 
     #[test]

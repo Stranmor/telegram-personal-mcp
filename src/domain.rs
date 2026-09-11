@@ -182,6 +182,7 @@ pub struct UpdatesDifferenceSummary {
     #[schemars(
         description = "Number of secret-chat encrypted messages omitted from this safe typed surface."
     )]
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub encrypted_message_count: usize,
     pub deleted_messages: Vec<DeletedMessagesSummary>,
     pub other_updates: Vec<UpdateKindSummary>,
@@ -256,6 +257,7 @@ pub struct BusinessChatLinkSummary {
     #[schemars(description = "Untrusted Telegram Business link; never open it automatically.")]
     pub link: String,
     pub message: String,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub entity_count: usize,
     #[schemars(description = "SHA-256 of the exact serialized Telegram message-entity vector.")]
     pub entities_sha256: String,
@@ -265,6 +267,7 @@ pub struct BusinessChatLinkSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct BusinessChatLinksPage {
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub count: usize,
     pub links: Vec<BusinessChatLinkSummary>,
     pub related_chats: Vec<ChatSummary>,
@@ -275,6 +278,7 @@ pub struct BusinessChatLinksPage {
 pub struct ResolvedBusinessChatLinkSummary {
     pub peer_ref: String,
     pub message: String,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub entity_count: usize,
     #[schemars(description = "SHA-256 of the exact serialized Telegram message-entity vector.")]
     pub entities_sha256: String,
@@ -287,6 +291,7 @@ pub struct BusinessChatLinkContent {
     pub source_message: String,
     pub parse_mode: CaptionParseMode,
     pub rendered_message: String,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub entity_count: usize,
     #[schemars(description = "SHA-256 of the exact serialized Telegram message-entity vector.")]
     pub entities_sha256: String,
@@ -561,6 +566,7 @@ pub struct StarsTransactionSummary {
     #[schemars(description = "Untrusted provider URL; never open it automatically.")]
     pub transaction_url: Option<String>,
     pub bot_payload_sha256: Option<String>,
+    #[schemars(schema_with = "crate::opt_non_negative_integer_schema")]
     pub bot_payload_length: Option<usize>,
     pub message_id: Option<i32>,
     pub extended_media_types: Option<Vec<String>>,
@@ -762,6 +768,7 @@ pub struct SavedStarGiftSummary {
     pub collection_ids: Vec<i32>,
     pub has_prepaid_upgrade_hash: bool,
     pub prepaid_upgrade_hash_sha256: Option<String>,
+    #[schemars(schema_with = "crate::opt_non_negative_integer_schema")]
     pub prepaid_upgrade_hash_length: Option<usize>,
     pub drop_original_details_stars: Option<String>,
     pub gift_number: Option<i32>,
@@ -929,6 +936,7 @@ impl FactCheckSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct FactCheckPage {
     pub chat_id: String,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub returned_count: usize,
     pub fact_checks: Vec<FactCheckSummary>,
 }
@@ -1083,6 +1091,7 @@ pub struct BoostSlotSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct MyBoostsSummary {
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub returned_count: usize,
     pub slots: Vec<BoostSlotSummary>,
 }
@@ -1097,6 +1106,7 @@ pub struct BoostStatusSummary {
     pub next_level_boosts: Option<i32>,
     pub premium_audience: Option<StatsPercentSummary>,
     pub boost_url: String,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub prepaid_giveaway_count: usize,
     pub my_boost: bool,
     pub my_boost_slots: Vec<i32>,
@@ -1120,6 +1130,7 @@ pub struct BoostSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct BoostPage {
     pub total_count: i32,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub returned_count: usize,
     pub boosts: Vec<BoostSummary>,
     pub next_offset: Option<String>,
@@ -1249,6 +1260,7 @@ pub struct AdminLogEventSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct AdminLogPage {
     pub chat_id: String,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub returned_count: usize,
     pub events: Vec<AdminLogEventSummary>,
     pub next_max_id: Option<i64>,
@@ -1348,6 +1360,7 @@ pub struct StoryListPage {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct StoryPeerPage {
     pub peer: StoryPeerSummary,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub count: usize,
 }
 
@@ -1554,7 +1567,9 @@ pub struct EmojiStatusCatalogPage {
     #[schemars(description = "Exact response hash encoded as signed decimal text when returned.")]
     pub response_hash: Option<String>,
     pub not_modified: bool,
+    #[schemars(schema_with = "crate::opt_non_negative_integer_schema")]
     pub available_count: Option<usize>,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub returned_count: usize,
     pub truncated: bool,
     pub statuses: Vec<EmojiStatusSummary>,
@@ -1631,8 +1646,11 @@ pub struct ProfilePhotoSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ProfilePhotoPage {
     pub photos: Vec<ProfilePhotoSummary>,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub offset: usize,
+    #[schemars(schema_with = "crate::opt_non_negative_integer_schema")]
     pub next_offset: Option<usize>,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub total_count: usize,
     pub completeness: Completeness,
 }
@@ -1660,11 +1678,16 @@ pub struct ParticipantPage {
     pub chat_id: String,
     pub filter: ParticipantFilter,
     pub query: Option<String>,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub offset: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub limit: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub total_count: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub returned_count: usize,
     pub participants: Vec<ChatMemberSummary>,
+    #[schemars(schema_with = "crate::opt_non_negative_integer_schema")]
     pub next_offset: Option<usize>,
     pub has_more: bool,
     pub completeness: Completeness,
@@ -1820,6 +1843,7 @@ pub struct InviteChatBinding {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct InviteUserBinding {
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub index: usize,
     pub source_ref: String,
     pub user_id: i64,
@@ -1852,7 +1876,9 @@ pub enum InviteConfirmation {
 pub struct InviteTargetProgress {
     pub target: InviteUserBinding,
     pub state: InviteTargetState,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub attempt_count: u32,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub observation_count: u32,
     pub next_action_at_unix: Option<i64>,
     pub last_error_code: Option<String>,
@@ -1863,13 +1889,21 @@ pub struct InviteTargetProgress {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct InviteBatchProgress {
     pub chat: InviteChatBinding,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub total_count: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub pending_count: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub issuing_count: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub retry_wait_count: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub confirmed_count: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub already_present_count: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub rejected_count: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub outcome_unknown_count: usize,
     pub next_action_at_unix: Option<i64>,
     pub targets: Vec<InviteTargetProgress>,
@@ -1924,6 +1958,7 @@ pub struct InviteJoinerSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct InviteJoinerPage {
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub total_count: usize,
     pub entries: Vec<InviteJoinerSummary>,
     pub next_offset_date_unix: Option<i32>,
@@ -2296,6 +2331,7 @@ pub struct StickerDocumentSummary {
     pub set_short_name: Option<String>,
     pub emoji: Option<String>,
     pub mime_type: String,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub size_bytes: u64,
     pub date_unix: i32,
     pub recent_date_unix: Option<i32>,
@@ -2315,7 +2351,9 @@ pub struct CustomEmojiDocumentSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CustomEmojiDocumentsPage {
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub requested_count: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub returned_count: usize,
     pub missing_document_ids: Vec<i64>,
     pub documents: Vec<CustomEmojiDocumentSummary>,
@@ -2325,6 +2363,7 @@ pub struct CustomEmojiDocumentsPage {
 pub struct DownloadedCustomEmoji {
     pub custom_emoji: CustomEmojiDocumentSummary,
     pub local_path: String,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub bytes_written: u64,
     pub sha256: String,
 }
@@ -2346,7 +2385,9 @@ pub struct StickerCatalogPage {
     pub not_modified: bool,
     pub hash: Option<i64>,
     pub attached: bool,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub total_count: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub returned_count: usize,
     pub has_more: bool,
     pub stickers: Vec<StickerDocumentSummary>,
@@ -2365,7 +2406,9 @@ pub struct StickerSetDetailsPage {
 pub struct StickerSetSearchPage {
     pub not_modified: bool,
     pub hash: Option<i64>,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub total_count: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub returned_count: usize,
     pub has_more: bool,
     pub sticker_sets: Vec<StickerSetSummary>,
@@ -2447,6 +2490,7 @@ pub struct ReactionCatalogPage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct PollOptionBinding {
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub index: usize,
     pub text: String,
     #[schemars(
@@ -2550,6 +2594,7 @@ pub struct PollMutationSnapshot {
     pub close_period_seconds: Option<i32>,
     pub close_date_unix: Option<i32>,
     pub countries_iso2: Vec<String>,
+    #[schemars(schema_with = "crate::non_negative_integer_array_schema")]
     pub selected_option_indices: Vec<usize>,
     pub attached_media_type: Option<String>,
 }
@@ -2561,6 +2606,7 @@ pub struct PollCreateSpec {
     pub public_voters: bool,
     pub multiple_choice: bool,
     pub quiz: bool,
+    #[schemars(schema_with = "crate::opt_non_negative_integer_schema")]
     pub correct_option_index: Option<usize>,
     pub open_answers: bool,
     pub revoting_disabled: bool,
@@ -2576,6 +2622,7 @@ pub struct PollCreateSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct PollVoterSummary {
     pub peer_ref: String,
+    #[schemars(schema_with = "crate::non_negative_integer_array_schema")]
     pub option_indices: Vec<usize>,
     #[schemars(
         description = "Opaque option bytes that were not present in the current poll answer list, encoded as lowercase hex."
@@ -2650,6 +2697,7 @@ pub struct RestoredMessageMapping {
 pub struct MutationFileArtifact {
     pub artifact_id: String,
     pub file_name: String,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub size_bytes: u64,
     pub sha256: String,
 }
@@ -2715,6 +2763,8 @@ pub enum CaptionParseMode {
     Markdown,
     #[serde(rename = "html")]
     Html,
+    #[serde(rename = "rich_markdown")]
+    RichMarkdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -2798,8 +2848,11 @@ pub struct MessageButtonStyleSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct MessageButtonSummary {
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub row: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub column: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub index: usize,
     pub kind: MessageButtonKind,
     pub label: String,
@@ -2809,6 +2862,7 @@ pub struct MessageButtonSummary {
     )]
     pub callback_data_base64: Option<String>,
     pub callback_data_sha256: Option<String>,
+    #[schemars(schema_with = "crate::opt_non_negative_integer_schema")]
     pub callback_data_length: Option<usize>,
     pub url: Option<String>,
     pub switch_query: Option<String>,
@@ -2845,11 +2899,15 @@ pub struct CallbackButtonSnapshot {
     pub chat_id: String,
     pub message_id: i32,
     pub message_date_unix: i32,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub row: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub column: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub index: usize,
     pub label: String,
     pub callback_data_sha256: String,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub callback_data_length: usize,
 }
 
@@ -3106,6 +3164,8 @@ pub enum MutationAction {
         #[serde(default)]
         source: Option<PreparedOutboundSource>,
         text: String,
+        #[serde(default)]
+        parse_mode: CaptionParseMode,
         reply_to: Option<MutationMessageSnapshot>,
         schedule_date_unix: i32,
         silent: bool,
@@ -3132,6 +3192,8 @@ pub enum MutationAction {
         chat_id: String,
         before: MutationMessageSnapshot,
         text: String,
+        #[serde(default)]
+        parse_mode: CaptionParseMode,
         schedule_date_unix: i32,
     },
     DeleteScheduledMessages {
@@ -3601,6 +3663,7 @@ pub enum MutationResult {
     },
     SavedHistoryDeleted {
         peer_ref: String,
+        #[schemars(schema_with = "crate::non_negative_integer_schema")]
         remaining_count: usize,
     },
     SavedDialogPinUpdated {
@@ -3723,6 +3786,7 @@ pub enum MutationResult {
     },
     PollVoteUpdated {
         message_id: i32,
+        #[schemars(schema_with = "crate::non_negative_integer_array_schema")]
         selected_option_indices: Vec<usize>,
     },
     PollStopped {
@@ -4004,6 +4068,7 @@ pub enum PreparedMutationState {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct PreparedMutation {
     pub mutation_id: String,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub schema_version: u32,
     pub account_user_id: i64,
     pub action: MutationAction,
@@ -4027,24 +4092,39 @@ pub enum MutationApprovalState {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationExecutionOwner {
+    #[default]
+    ManagedMcp,
+    ExternalOwner,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct MutationApproval {
     pub approval_id: String,
     pub mutation_id: String,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub schema_version: u32,
     pub account_user_id: i64,
     pub action: MutationAction,
     pub payload_sha256: String,
     pub state: MutationApprovalState,
+    pub execution_owner: MutationExecutionOwner,
+    pub external_owner_ready: bool,
+    pub external_owner_receipt: Option<String>,
     pub approval_chat_id: i64,
     pub approval_user_id: i64,
     pub approval_message_id: Option<i64>,
     pub created_at_unix: i64,
     pub expires_at_unix: i64,
     pub result: Option<MutationResult>,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub automated_retry_count: u32,
     pub next_retry_at_unix: Option<i64>,
     pub last_error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -4055,6 +4135,7 @@ pub struct AttachmentDescriptor {
     pub kind: String,
     pub file_name: Option<String>,
     pub mime_type: Option<String>,
+    #[schemars(schema_with = "crate::opt_non_negative_integer_schema")]
     pub size_bytes: Option<u64>,
     pub downloadable: bool,
 }
@@ -4063,6 +4144,7 @@ pub struct AttachmentDescriptor {
 pub struct DownloadedAttachment {
     pub attachment: AttachmentDescriptor,
     pub local_path: String,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub bytes_written: u64,
     pub sha256: String,
 }
@@ -4191,6 +4273,7 @@ pub struct SendApproval {
     pub created_at_unix: i64,
     pub expires_at_unix: i64,
     pub target_message_id: Option<i32>,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub automated_retry_count: u32,
     pub next_retry_at_unix: Option<i64>,
     pub last_error_code: Option<String>,
@@ -4202,8 +4285,11 @@ pub struct RichMessageSnapshot {
     pub message_id: i32,
     pub rtl: bool,
     pub part: bool,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub block_count: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub photo_count: usize,
+    #[schemars(schema_with = "crate::non_negative_integer_schema")]
     pub document_count: usize,
     #[schemars(
         description = "Lowercase SHA-256 of the complete Telegram RichMessage TL object returned by messages.getRichMessage."

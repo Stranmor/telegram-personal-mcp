@@ -156,6 +156,7 @@ pub struct UserInfo {
     pub user_id: i64,
     pub first_name: String,
     pub username: Option<String>,
+    pub premium: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2801,6 +2802,7 @@ impl TelegramClient {
         session_path: Option<PathBuf>,
         chat_id: &str,
         text: &str,
+        parse_mode: CaptionParseMode,
         reply_to_message_id: Option<i32>,
         schedule_date_unix: i32,
         silent: bool,
@@ -2832,6 +2834,7 @@ impl TelegramClient {
                 poll_option: None,
             })
         });
+        let content = caption_input(text, parse_mode);
         let updates = connected
             .client
             .invoke(&tl::functions::messages::SendMessage {
@@ -2845,10 +2848,10 @@ impl TelegramClient {
                 allow_paid_floodskip: false,
                 peer: input_peer,
                 reply_to,
-                message: text.to_string(),
+                message: content.text,
                 random_id,
                 reply_markup: None,
-                entities: None,
+                entities: content.entities,
                 schedule_date: Some(schedule_date_unix),
                 schedule_repeat_period: None,
                 send_as: None,
@@ -2856,7 +2859,7 @@ impl TelegramClient {
                 effect: None,
                 allow_paid_stars: None,
                 suggested_post: None,
-                rich_message: None,
+                rich_message: content.rich_message,
             })
             .await
             .map_err(send_invocation_error)?;
@@ -2883,6 +2886,23 @@ impl TelegramClient {
         mode: FileSendMode,
         random_id: i64,
     ) -> Result<i32, TelegramError> {
+        if matches!(caption_parse_mode, CaptionParseMode::RichMarkdown) {
+            return self
+                .schedule_rich_file_with_random_id(
+                    session_path,
+                    chat_id,
+                    file_path,
+                    caption,
+                    reply_to_message_id,
+                    schedule_date_unix,
+                    silent,
+                    noforwards,
+                    mode,
+                    random_id,
+                )
+                .await;
+        }
+        reject_rich_media_caption(caption_parse_mode, "scheduled media")?;
         let connected = self.connected(session_path).await?;
         let peer_ref = Self::resolve_peer_ref(&connected.client, chat_id).await?;
         let peer = connected
@@ -2895,11 +2915,8 @@ impl TelegramClient {
             .resolve_to_input_peer(&peer)
             .await
             .map_err(|error| TelegramError::Telegram(error.to_string()))?;
-        let uploaded = connected
-            .client
-            .upload_file(file_path)
-            .await
-            .map_err(|error| TelegramError::Telegram(error.to_string()))?;
+        let uploaded =
+            connected.client.upload_file(file_path).await.map_err(send_invocation_error)?;
         let media = match mode {
             FileSendMode::Auto => uploaded.as_auto_media(),
             FileSendMode::Document => uploaded.as_document_media(),
@@ -2950,25 +2967,167 @@ impl TelegramClient {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn schedule_rich_file_with_random_id(
+        &self,
+        session_path: Option<PathBuf>,
+        chat_id: &str,
+        file_path: &Path,
+        caption: &str,
+        reply_to_message_id: Option<i32>,
+        schedule_date_unix: i32,
+        silent: bool,
+        noforwards: bool,
+        mode: FileSendMode,
+        random_id: i64,
+    ) -> Result<i32, TelegramError> {
+        if !matches!(mode, FileSendMode::Auto | FileSendMode::Photo) {
+            return Err(TelegramError::SendRejected(
+                "native RichMessage media currently supports photo uploads only".to_string(),
+            ));
+        }
+        let normalized_caption = normalize_rich_markdown(caption);
+        let connected = self.connected(session_path).await?;
+        let peer_ref = Self::resolve_peer_ref(&connected.client, chat_id).await?;
+        let peer = connected
+            .client
+            .resolve(peer_ref.as_str())
+            .await
+            .map_err(|error| TelegramError::Telegram(error.to_string()))?;
+        let input_peer = connected
+            .client
+            .resolve_to_input_peer(&peer)
+            .await
+            .map_err(|error| TelegramError::Telegram(error.to_string()))?;
+        let uploaded =
+            connected.client.upload_file(file_path).await.map_err(send_invocation_error)?;
+        if !uploaded.mime_type().starts_with("image/") || uploaded.mime_type() == "image/gif" {
+            return Err(TelegramError::SendRejected(format!(
+                "native RichMessage media requires a static image; detected {}",
+                uploaded.mime_type()
+            )));
+        }
+        let tl::enums::InputMedia::UploadedPhoto(uploaded_photo) = uploaded.as_photo_media() else {
+            return Err(TelegramError::Telegram(
+                "Ferogram did not produce uploaded photo media for RichMessage".to_string(),
+            ));
+        };
+        let uploaded_media = connected
+            .client
+            .invoke(&tl::functions::messages::UploadMedia {
+                business_connection_id: None,
+                peer: input_peer.clone(),
+                media: tl::enums::InputMedia::UploadedPhoto(uploaded_photo),
+            })
+            .await
+            .map_err(send_invocation_error)?;
+        let photo = match uploaded_media {
+            tl::enums::MessageMedia::Photo(media) => match media.photo {
+                Some(tl::enums::Photo::Photo(photo)) => photo,
+                _ => {
+                    return Err(TelegramError::Telegram(
+                        "Telegram returned an empty uploaded photo for RichMessage".to_string(),
+                    ));
+                },
+            },
+            _ => {
+                return Err(TelegramError::Telegram(
+                    "Telegram returned non-photo media for RichMessage upload".to_string(),
+                ));
+            },
+        };
+        let photo_input = tl::enums::InputPhoto::InputPhoto(tl::types::InputPhoto {
+            id: photo.id,
+            access_hash: photo.access_hash,
+            file_reference: photo.file_reference,
+        });
+        let rich_message =
+            tl::enums::InputRichMessage::Markdown(tl::types::InputRichMessageMarkdown {
+                rtl: false,
+                noautolink: false,
+                markdown: format!("![](tg://photo?id=visual)\n\n{normalized_caption}"),
+                files: Some(vec![tl::enums::InputRichFile::Photo(tl::types::InputRichFilePhoto {
+                    id: "visual".to_string(),
+                    photo: photo_input,
+                })]),
+            });
+        let updates = connected
+            .client
+            .invoke(&tl::functions::messages::SendMessage {
+                no_webpage: false,
+                silent,
+                background: false,
+                clear_draft: false,
+                noforwards,
+                update_stickersets_order: false,
+                invert_media: false,
+                allow_paid_floodskip: false,
+                peer: input_peer,
+                reply_to: input_reply_to(reply_to_message_id, None),
+                message: String::new(),
+                random_id,
+                reply_markup: None,
+                entities: None,
+                schedule_date: Some(schedule_date_unix),
+                schedule_repeat_period: None,
+                send_as: None,
+                quick_reply_shortcut: None,
+                effect: None,
+                allow_paid_stars: None,
+                suggested_post: None,
+                rich_message: Some(rich_message),
+            })
+            .await
+            .map_err(send_invocation_error)?;
+        sent_message_id(&updates, random_id).ok_or_else(|| {
+            TelegramError::DeliveryUncertain(
+                "Telegram accepted scheduled RichMessage media but response contained no scheduled message ID"
+                    .to_string(),
+            )
+        })
+    }
+
     pub async fn edit_scheduled_message(
         &self,
         session_path: Option<PathBuf>,
         chat_id: &str,
         message_id: i32,
         text: &str,
+        parse_mode: CaptionParseMode,
         schedule_date_unix: i32,
     ) -> Result<(), TelegramError> {
         let connected = self.connected(session_path).await?;
-        let peer = Self::resolve_peer_ref(&connected.client, chat_id).await?;
+        let peer_ref = Self::resolve_peer_ref(&connected.client, chat_id).await?;
+        let peer = connected
+            .client
+            .resolve(peer_ref.as_str())
+            .await
+            .map_err(|error| TelegramError::Telegram(error.to_string()))?;
+        let input_peer = connected
+            .client
+            .resolve_to_input_peer(&peer)
+            .await
+            .map_err(|error| TelegramError::Telegram(error.to_string()))?;
+        let content = caption_input(text, parse_mode);
         connected
             .client
-            .edit_message(
-                peer.as_str(),
-                message_id,
-                InputMessage::text(text).schedule_date(Some(schedule_date_unix)),
-            )
+            .invoke(&tl::functions::messages::EditMessage {
+                no_webpage: false,
+                invert_media: false,
+                peer: input_peer,
+                id: message_id,
+                message: Some(content.text),
+                media: None,
+                reply_markup: None,
+                entities: content.entities,
+                schedule_date: Some(schedule_date_unix),
+                schedule_repeat_period: None,
+                quick_reply_shortcut_id: None,
+                rich_message: content.rich_message,
+            })
             .await
             .map_err(send_invocation_error)
+            .map(|_| ())
     }
 
     pub async fn delete_scheduled_messages(
@@ -8561,6 +8720,7 @@ impl TelegramClient {
         random_id: i64,
         kind: UploadedDocumentKind,
     ) -> Result<i32, TelegramError> {
+        reject_rich_media_caption(caption_parse_mode, "media")?;
         let connected = self.connected(session_path).await?;
         let peer_ref = Self::resolve_peer_ref(&connected.client, chat_id).await?;
         let peer = connected
@@ -8787,6 +8947,7 @@ impl TelegramClient {
         noforwards: bool,
         random_ids: &[i64],
     ) -> Result<Vec<i32>, TelegramError> {
+        reject_rich_media_caption(caption_parse_mode, "album")?;
         if !(2..=10).contains(&items.len()) || items.len() != random_ids.len() {
             return Err(TelegramError::InvalidPeer(
                 "album requires 2-10 items and one random id per item".to_string(),
@@ -9111,7 +9272,8 @@ impl TelegramClient {
         reply_to_message_id: Option<i32>,
         random_id: i64,
     ) -> Result<i32, TelegramError> {
-        let blocks = ferogram::parsers::parse_rich_markdown(markdown);
+        let normalized_markdown = normalize_rich_markdown(markdown);
+        let blocks = ferogram::parsers::parse_rich_markdown(&normalized_markdown);
         if blocks.is_empty() {
             return Err(TelegramError::SendRejected(
                 "rich Markdown produced no Telegram PageBlock content".to_string(),
@@ -9183,26 +9345,57 @@ impl TelegramClient {
         let connected = self.connected(session_path).await?;
         let (canonical_chat_id, input_peer) =
             resolve_rich_message_peer(&connected.client, chat_id).await?;
-        let page = connected
+        let direct_result = connected
             .client
             .invoke(&tl::functions::messages::GetRichMessage { peer: input_peer, id: message_id })
+            .await;
+        let direct_error = direct_result.as_ref().err().map(ToString::to_string);
+        let direct_rich_message = direct_result.ok().and_then(|page| {
+            let messages = match page {
+                tl::enums::messages::Messages::Messages(page) => page.messages,
+                tl::enums::messages::Messages::Slice(page) => page.messages,
+                tl::enums::messages::Messages::ChannelMessages(page) => page.messages,
+                tl::enums::messages::Messages::NotModified(_) => Vec::new(),
+            };
+            messages.into_iter().find_map(|message| match message {
+                tl::enums::Message::Message(message) if message.id == message_id => {
+                    message.rich_message
+                },
+                _ => None,
+            })
+        });
+        if let Some(rich_message) = direct_rich_message {
+            return Ok(Some(rich_message_snapshot(canonical_chat_id, message_id, &rich_message)));
+        }
+
+        // Telegram's GetRichMessage may omit queued messages. GetScheduledHistory carries the
+        // same native payload and is the authoritative readback while a message is scheduled.
+        let scheduled = connected
+            .client
+            .get_scheduled_messages(canonical_chat_id.clone())
             .await
-            .map_err(|error| TelegramError::Telegram(error.to_string()))?;
-        let messages = match page {
-            tl::enums::messages::Messages::Messages(page) => page.messages,
-            tl::enums::messages::Messages::Slice(page) => page.messages,
-            tl::enums::messages::Messages::ChannelMessages(page) => page.messages,
-            tl::enums::messages::Messages::NotModified(_) => Vec::new(),
-        };
-        let rich_message = messages.into_iter().find_map(|message| match message {
+            .map_err(|error| {
+                let error = error.to_string();
+                match direct_error.as_deref() {
+                    Some(direct_error) => TelegramError::Telegram(format!(
+                        "GetRichMessage failed: {direct_error}; scheduled-history fallback failed: {error}"
+                    )),
+                    None => TelegramError::Telegram(error),
+                }
+            })?;
+        let scheduled_rich_message = scheduled.into_iter().find_map(|message| match message.raw {
             tl::enums::Message::Message(message) if message.id == message_id => {
                 message.rich_message
             },
             _ => None,
         });
-        Ok(rich_message.map(|rich_message| {
-            rich_message_snapshot(canonical_chat_id, message_id, &rich_message)
-        }))
+        if let Some(rich_message) = scheduled_rich_message {
+            return Ok(Some(rich_message_snapshot(canonical_chat_id, message_id, &rich_message)));
+        }
+        if let Some(direct_error) = direct_error {
+            return Err(TelegramError::Telegram(direct_error));
+        }
+        Ok(None)
     }
 
     pub async fn send_message(
@@ -10169,6 +10362,7 @@ impl TelegramBackend for TelegramClient {
         session_path: Option<PathBuf>,
         chat_id: &str,
         text: &str,
+        parse_mode: CaptionParseMode,
         reply_to_message_id: Option<i32>,
         schedule_date_unix: i32,
         silent: bool,
@@ -10180,6 +10374,7 @@ impl TelegramBackend for TelegramClient {
             session_path,
             chat_id,
             text,
+            parse_mode,
             reply_to_message_id,
             schedule_date_unix,
             silent,
@@ -10227,6 +10422,7 @@ impl TelegramBackend for TelegramClient {
         chat_id: &str,
         message_id: i32,
         text: &str,
+        parse_mode: CaptionParseMode,
         schedule_date_unix: i32,
     ) -> Result<(), TelegramError> {
         TelegramClient::edit_scheduled_message(
@@ -10235,6 +10431,7 @@ impl TelegramBackend for TelegramClient {
             chat_id,
             message_id,
             text,
+            parse_mode,
             schedule_date_unix,
         )
         .await
@@ -12226,6 +12423,7 @@ fn user_info(me: tl::types::User) -> UserInfo {
         user_id: me.id,
         first_name: me.first_name.unwrap_or_default(),
         username: me.username,
+        premium: me.premium,
     }
 }
 
@@ -15593,6 +15791,7 @@ fn resolved_business_chat_link_summary(
 fn business_chat_link_content_input(
     content: &BusinessChatLinkContent,
 ) -> Result<tl::enums::InputBusinessChatLink, TelegramError> {
+    reject_rich_media_caption(content.parse_mode, "Business chat link")?;
     let parsed = caption_input(&content.source_message, content.parse_mode);
     let entities = parsed.entities.unwrap_or_default();
     if business_chat_link_content_from_source(
@@ -16843,7 +17042,50 @@ fn caption_input(caption: &str, parse_mode: CaptionParseMode) -> InputMessage {
         CaptionParseMode::Plain => InputMessage::text(caption),
         CaptionParseMode::Markdown => InputMessage::markdown(caption),
         CaptionParseMode::Html => InputMessage::html(caption),
+        CaptionParseMode::RichMarkdown => {
+            let normalized_caption = normalize_rich_markdown(caption);
+            InputMessage::text("")
+                .rich_text(ferogram::parsers::parse_rich_markdown(&normalized_caption))
+        },
     }
+}
+
+pub(crate) fn normalize_rich_markdown(markdown: &str) -> String {
+    markdown
+        .split_inclusive('\n')
+        .map(|segment| {
+            let line = segment.strip_suffix('\n').unwrap_or(segment);
+            let line_without_cr = line.strip_suffix('\r').unwrap_or(line);
+            if rich_markdown_line_is_literal_hash(line_without_cr) {
+                format!("\\{segment}")
+            } else {
+                segment.to_string()
+            }
+        })
+        .collect()
+}
+
+fn rich_markdown_line_is_literal_hash(line: &str) -> bool {
+    if !line.starts_with('#') {
+        return false;
+    }
+    let hash_count = line.chars().take_while(|character| *character == '#').count();
+    if !(1..=6).contains(&hash_count) {
+        return false;
+    }
+    line.chars().nth(hash_count).is_some_and(|character| !character.is_whitespace())
+}
+
+fn reject_rich_media_caption(
+    parse_mode: CaptionParseMode,
+    operation: &str,
+) -> Result<(), TelegramError> {
+    if matches!(parse_mode, CaptionParseMode::RichMarkdown) {
+        return Err(TelegramError::InvalidPeer(format!(
+            "{operation} does not support native RichMessage captions; use a text message"
+        )));
+    }
+    Ok(())
 }
 
 fn rich_media_to_input(media: &RichMediaSpec) -> tl::enums::InputMedia {
@@ -18157,6 +18399,17 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn rich_markdown_hash_tags_are_not_promoted_to_headings() {
+        let source = "# Заголовок\n\n#нейродинамика #осанка\n### Подзаголовок";
+        let normalized = normalize_rich_markdown(source);
+        assert_eq!(normalized, "# Заголовок\n\n\\#нейродинамика #осанка\n### Подзаголовок");
+        let blocks = ferogram::parsers::parse_rich_markdown(&normalized);
+        assert!(matches!(blocks.first(), Some(tl::enums::PageBlock::Heading1(_))));
+        assert!(matches!(blocks.get(1), Some(tl::enums::PageBlock::Paragraph(_))));
+        assert!(matches!(blocks.get(2), Some(tl::enums::PageBlock::Heading3(_))));
+    }
 
     fn raw_test_message(
         id: i32,
