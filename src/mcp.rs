@@ -219,6 +219,15 @@ const MAX_PARTICIPANTS_LIMIT: usize = 200;
 const MAX_PARTICIPANT_QUERY_UTF16: usize = 256;
 const DEFAULT_CONTEXT_MESSAGES: usize = 5;
 const MAX_CONTEXT_MESSAGES: usize = 25;
+/// Bounded nullable-integer schema for the read_context window. A schemars
+/// `schema_with` override replaces the whole field schema, so a bare
+/// `range(max)` would be silently dropped from the advertised contract
+/// (see tests/caller_contracts.rs); the bound therefore lives here.
+pub(crate) fn opt_context_window_schema(
+    _generator: &mut schemars::SchemaGenerator,
+) -> schemars::Schema {
+    schemars::json_schema!({"anyOf": [{"type": "integer", "minimum": 0, "maximum": MAX_CONTEXT_MESSAGES}, {"type": "null"}]})
+}
 /// Match Telegram's large-file envelope instead of imposing the old 64 MiB
 /// application-only ceiling. Deployment profiles may still lower these values.
 pub const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -2804,14 +2813,14 @@ struct ReadContextArgs {
         description = "Messages before the target: 0..=25; defaults to 5.",
         range(max = MAX_CONTEXT_MESSAGES)
     )]
-    #[schemars(schema_with = "crate::opt_non_negative_integer_schema")]
+    #[schemars(schema_with = "crate::mcp::opt_context_window_schema")]
     before: Option<usize>,
     #[serde(default)]
     #[schemars(
         description = "Messages after the target: 0..=25; defaults to 5.",
         range(max = MAX_CONTEXT_MESSAGES)
     )]
-    #[schemars(schema_with = "crate::opt_non_negative_integer_schema")]
+    #[schemars(schema_with = "crate::mcp::opt_context_window_schema")]
     after: Option<usize>,
 }
 
