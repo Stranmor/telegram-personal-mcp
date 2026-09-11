@@ -36,20 +36,16 @@ impl Client {
             tl::enums::auth::Authorization::Authorization(a) => {
                 self.cache_user(&a.user).await;
                 Self::extract_user_name(&a.user)
-            }
+            },
             tl::enums::auth::Authorization::SignUpRequired(_) => {
                 return Err(InvocationError::Deserialize(
                     "unexpected SignUpRequired during bot sign-in".into(),
                 ));
-            }
+            },
         };
         tracing::info!("[ferogram::auth] bot signed in: {name}");
-        self.inner
-            .is_bot
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.inner
-            .signed_in
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.inner.is_bot.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.inner.signed_in.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.sync_pts_state().await;
         Ok(name)
     }
@@ -87,8 +83,7 @@ impl Client {
         &self,
         phone: &str,
     ) -> Result<SendCodeOutcome, InvocationError> {
-        self.request_login_code_with_options(phone, SendCodeOptions::default())
-            .await
+        self.request_login_code_with_options(phone, SendCodeOptions::default()).await
     }
 
     /// Like [`Client::request_login_code`] but with full control over
@@ -181,7 +176,7 @@ impl Client {
                     SentCodeType::App(_) => {
                         "a Telegram message on another already-logged-in device/app \
                          (not SMS)"
-                    }
+                    },
                     SentCodeType::Sms(_) => "SMS",
                     SentCodeType::Call(_) => "a voice call reading out the code",
                     SentCodeType::FlashCall(_) => "a flash call (read the caller ID digits)",
@@ -202,7 +197,7 @@ impl Client {
                     phone: phone.to_string(),
                     phone_code_hash: s.phone_code_hash,
                 }))
-            }
+            },
             SentCode::Success(s) => {
                 // Telegram recognized a logout token and authorized the session
                 // immediately, no code entry is needed.
@@ -221,23 +216,21 @@ impl Client {
                         tracing::info!(
                             "[ferogram::auth] fast re-auth complete; signed in: welcome, {name}"
                         );
-                        self.inner
-                            .signed_in
-                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        self.inner.signed_in.store(true, std::sync::atomic::Ordering::SeqCst);
                         let _ = self.sync_pts_state().await;
                         Ok(SendCodeOutcome::AlreadyAuthorized(name))
-                    }
+                    },
                     tl::enums::auth::Authorization::SignUpRequired(_) => {
                         Err(InvocationError::Deserialize(
                             "sentCodeSuccess returned SignUpRequired; account not registered"
                                 .into(),
                         ))
-                    }
+                    },
                 }
-            }
-            SentCode::PaymentRequired(_) => Err(InvocationError::Deserialize(
-                "payment required to send code".into(),
-            )),
+            },
+            SentCode::PaymentRequired(_) => {
+                Err(InvocationError::Deserialize("payment required to send code".into()))
+            },
         }
     }
 
@@ -257,11 +250,11 @@ impl Client {
                 tracing::info!("[ferogram::auth] 2FA password required");
                 let t = self.get_password_info().await.map_err(SignInError::Other)?;
                 return Err(SignInError::PasswordRequired(Box::new(t)));
-            }
+            },
             Err(e) if e.is("PHONE_CODE_*") => {
                 tracing::warn!("[ferogram::auth] login code rejected: {e}");
                 return Err(SignInError::InvalidCode);
-            }
+            },
             Err(e) => return Err(SignInError::Other(e)),
         };
 
@@ -273,18 +266,16 @@ impl Client {
                 self.cache_user(&a.user).await;
                 let name = Self::extract_user_name(&a.user);
                 tracing::info!("[ferogram::auth] signed in: welcome, {name}");
-                self.inner
-                    .signed_in
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                self.inner.signed_in.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = self.sync_pts_state().await;
                 Ok(name)
-            }
+            },
             tl::enums::auth::Authorization::SignUpRequired(_) => {
                 tracing::warn!(
                     "[ferogram::auth] phone number not registered on Telegram; sign-up required"
                 );
                 Err(SignInError::SignUpRequired)
-            }
+            },
         }
     }
 
@@ -300,24 +291,16 @@ impl Client {
             .current_algo
             .ok_or_else(|| InvocationError::Deserialize("no current_algo".into()))?;
         let (salt1, salt2, p, g) = extract_password_params(&algo)?;
-        let g_b = pw
-            .srp_b
-            .ok_or_else(|| InvocationError::Deserialize("no srp_b".into()))?;
+        let g_b = pw.srp_b.ok_or_else(|| InvocationError::Deserialize("no srp_b".into()))?;
         let a = pw.secure_random;
-        let srp_id = pw
-            .srp_id
-            .ok_or_else(|| InvocationError::Deserialize("no srp_id".into()))?;
+        let srp_id = pw.srp_id.ok_or_else(|| InvocationError::Deserialize("no srp_id".into()))?;
 
         let (m1, g_a) =
             two_factor_auth::calculate_2fa(salt1, salt2, p, g, &g_b, &a, password.as_ref())
                 .map_err(|e| InvocationError::Deserialize(e.to_string()))?;
         let req = tl::functions::auth::CheckPassword {
             password: tl::enums::InputCheckPasswordSrp::InputCheckPasswordSrp(
-                tl::types::InputCheckPasswordSrp {
-                    srp_id,
-                    a: g_a.to_vec(),
-                    m1: m1.to_vec(),
-                },
+                tl::types::InputCheckPasswordSrp { srp_id, a: g_a.to_vec(), m1: m1.to_vec() },
             ),
         };
         tracing::debug!("[ferogram::auth] submitting auth.checkPassword");
@@ -329,15 +312,13 @@ impl Client {
                 self.cache_user(&a.user).await;
                 let name = Self::extract_user_name(&a.user);
                 tracing::info!("[ferogram::auth] 2FA verified; signed in: welcome, {name}");
-                self.inner
-                    .signed_in
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                self.inner.signed_in.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = self.sync_pts_state().await;
                 Ok(name)
-            }
-            tl::enums::auth::Authorization::SignUpRequired(_) => Err(InvocationError::Deserialize(
-                "unexpected SignUpRequired after 2FA".into(),
-            )),
+            },
+            tl::enums::auth::Authorization::SignUpRequired(_) => {
+                Err(InvocationError::Deserialize("unexpected SignUpRequired after 2FA".into()))
+            },
         }
     }
 
@@ -362,13 +343,13 @@ impl Client {
                         }
                         *self.inner.future_auth_token.lock() = lo.future_auth_token;
                         self.mark_session_snapshot_dirty();
-                    }
+                    },
                     Err(e) => {
                         tracing::debug!(
                             "[ferogram::auth] could not parse auth.LoggedOut ({e}); \
                              future_auth_token unavailable this session"
                         );
-                    }
+                    },
                 }
 
                 tracing::info!("[ferogram::auth] signed out");
@@ -389,7 +370,7 @@ impl Client {
                 // Clear per-DC connect gates so fresh connections can be made after re-login.
                 self.inner.dc_connect_gates.lock().clear();
                 Ok(true)
-            }
+            },
             Err(e) if e.is("AUTH_KEY_UNREGISTERED") => Ok(false),
             Err(e) => Err(e),
         }
@@ -424,10 +405,7 @@ impl Client {
         let mut cur = Cursor::from_slice(&body);
         let users = Vec::<tl::enums::User>::deserialize(&mut cur)?;
         self.cache_users_slice(&users).await;
-        Ok(users
-            .into_iter()
-            .map(crate::types::User::from_raw)
-            .collect())
+        Ok(users.into_iter().map(crate::types::User::from_raw).collect())
     }
 
     /// Resolve a user by message context (no access_hash required).
@@ -439,13 +417,11 @@ impl Client {
         user_id: i64,
     ) -> Result<Option<tl::types::User>, InvocationError> {
         let req = tl::functions::users::GetUsers {
-            id: vec![tl::enums::InputUser::FromMessage(
-                tl::types::InputUserFromMessage {
-                    peer,
-                    msg_id,
-                    user_id,
-                },
-            )],
+            id: vec![tl::enums::InputUser::FromMessage(tl::types::InputUserFromMessage {
+                peer,
+                msg_id,
+                user_id,
+            })],
         };
         let body: Vec<u8> = self.rpc_call_raw(&req).await?;
         let mut cur = Cursor::from_slice(&body);
@@ -465,11 +441,7 @@ impl Client {
     /// has happened yet in this session - call `my_id_or_fetch()` for a
     /// version that falls back to a network call in that case.
     pub fn my_id(&self) -> Option<i64> {
-        match self
-            .inner
-            .self_user_id
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
+        match self.inner.self_user_id.load(std::sync::atomic::Ordering::Relaxed) {
             0 => None,
             id => Some(id),
         }
@@ -505,9 +477,7 @@ impl Client {
                 lang_code: self.inner.lang_code.clone(),
                 proxy: None,
                 params: None,
-                query: GetUsers {
-                    id: vec![tl::enums::InputUser::UserSelf],
-                },
+                query: GetUsers { id: vec![tl::enums::InputUser::UserSelf] },
             },
         };
         let body: Vec<u8> = self.rpc_call_raw_serializable(&req).await?;
@@ -525,9 +495,7 @@ impl Client {
 
     async fn get_password_info(&self) -> Result<PasswordToken, InvocationError> {
         tracing::debug!("[ferogram::auth] fetching 2FA password parameters");
-        let body = self
-            .rpc_call_raw(&tl::functions::account::GetPassword {})
-            .await?;
+        let body = self.rpc_call_raw(&tl::functions::account::GetPassword {}).await?;
         let mut cur = Cursor::from_slice(&body);
         let tl::enums::account::Password::Password(pw) =
             tl::enums::account::Password::deserialize(&mut cur)?;
@@ -610,19 +578,17 @@ impl Client {
                         "QR login: unexpected token state after migration".into(),
                     )),
                 }
-            }
+            },
             tl::enums::auth::LoginToken::Success(s) => {
                 // Already authorised (user scanned before we called this)
                 if let tl::enums::auth::Authorization::Authorization(a) = s.authorization {
                     self.cache_user(&a.user).await;
                     Self::extract_user_name(&a.user);
-                    self.inner
-                        .signed_in
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.inner.signed_in.store(true, std::sync::atomic::Ordering::SeqCst);
                     let _ = self.sync_pts_state().await;
                 }
                 Ok((vec![], 0))
-            }
+            },
         }
     }
 
@@ -640,15 +606,13 @@ impl Client {
                 if let tl::enums::auth::Authorization::Authorization(a) = s.authorization {
                     self.cache_user(&a.user).await;
                     let name = Self::extract_user_name(&a.user);
-                    self.inner
-                        .signed_in
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.inner.signed_in.store(true, std::sync::atomic::Ordering::SeqCst);
                     let _ = self.sync_pts_state().await;
                     Ok(Some(name))
                 } else {
                     Ok(None)
                 }
-            }
+            },
             _ => Ok(None),
         }
     }
@@ -663,7 +627,7 @@ fn extract_password_params(
     match algo {
         tl::enums::PasswordKdfAlgo::Sha256Sha256Pbkdf2Hmacsha512iter100000Sha256ModPow(a) => {
             Ok((&a.salt1, &a.salt2, &a.p, a.g))
-        }
+        },
         _ => Err(InvocationError::Deserialize("unknown 2FA algo".into())),
     }
 }

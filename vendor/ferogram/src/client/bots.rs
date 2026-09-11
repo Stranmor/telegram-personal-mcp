@@ -33,12 +33,7 @@ impl Client {
         app: MiniApp,
     ) -> Result<MiniAppSession, InvocationError> {
         let peer_ref = peer.into().resolve(self).await?;
-        let input_peer = self
-            .inner
-            .peer_cache
-            .read()
-            .await
-            .peer_to_input(&peer_ref)?;
+        let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer_ref)?;
 
         match app {
             MiniApp::Main => {
@@ -55,7 +50,7 @@ impl Client {
                     .await
                     .map(|r: tl::enums::WebViewResult| r)?;
                 MiniAppSession::from_result(self.clone(), input_peer, res)
-            }
+            },
             MiniApp::Url(url) => {
                 let res = self
                     .invoke(&tl::functions::messages::RequestWebView {
@@ -75,12 +70,8 @@ impl Client {
                     .await
                     .map(|r: tl::enums::WebViewResult| r)?;
                 MiniAppSession::from_result(self.clone(), input_peer, res)
-            }
-            MiniApp::App {
-                bot: _,
-                app,
-                start_param,
-            } => {
+            },
+            MiniApp::App { bot: _, app, start_param } => {
                 let res = self
                     .invoke(&tl::functions::messages::RequestAppWebView {
                         compact: false,
@@ -95,7 +86,7 @@ impl Client {
                     .await
                     .map(|r: tl::enums::WebViewResult| r)?;
                 MiniAppSession::from_result(self.clone(), input_peer, res)
-            }
+            },
             MiniApp::Simple(url) => {
                 let res = self
                     .invoke(&tl::functions::messages::RequestSimpleWebView {
@@ -119,7 +110,7 @@ impl Client {
                     client: self.clone(),
                     input_peer,
                 })
-            }
+            },
         }
     }
 
@@ -180,15 +171,8 @@ impl Client {
         peer: impl Into<PeerRef>,
         start_param: impl Into<String>,
     ) -> Result<(), InvocationError> {
-        let bot_hash = self
-            .inner
-            .peer_cache
-            .read()
-            .await
-            .users
-            .get(&bot_user_id)
-            .copied()
-            .unwrap_or(0);
+        let bot_hash =
+            self.inner.peer_cache.read().await.users.get(&bot_user_id).copied().unwrap_or(0);
         let peer = peer.into().resolve(self).await?;
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
         let req = tl::functions::messages::StartBot {
@@ -218,15 +202,8 @@ impl Client {
     ) -> Result<(), InvocationError> {
         let peer = peer.into().resolve(self).await?;
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
-        let user_hash = self
-            .inner
-            .peer_cache
-            .read()
-            .await
-            .users
-            .get(&user_id)
-            .copied()
-            .unwrap_or(0);
+        let user_hash =
+            self.inner.peer_cache.read().await.users.get(&user_id).copied().unwrap_or(0);
         let req = tl::functions::messages::SetGameScore {
             edit_message,
             force,
@@ -251,15 +228,8 @@ impl Client {
     ) -> Result<Vec<tl::types::HighScore>, InvocationError> {
         let peer = peer.into().resolve(self).await?;
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
-        let user_hash = self
-            .inner
-            .peer_cache
-            .read()
-            .await
-            .users
-            .get(&user_id)
-            .copied()
-            .unwrap_or(0);
+        let user_hash =
+            self.inner.peer_cache.read().await.users.get(&user_id).copied().unwrap_or(0);
         let req = tl::functions::messages::GetGameHighScores {
             peer: input_peer,
             id: msg_id,
@@ -375,25 +345,20 @@ impl Client {
     ) -> Result<bool, InvocationError> {
         let bot_input = if let Some(peer) = bot {
             let resolved = peer.into().resolve(self).await?;
-            let input_peer = self
-                .inner
-                .peer_cache
-                .read()
-                .await
-                .peer_to_input(&resolved)?;
+            let input_peer = self.inner.peer_cache.read().await.peer_to_input(&resolved)?;
             let input_user = match input_peer {
                 tl::enums::InputPeer::User(u) => {
                     tl::enums::InputUser::InputUser(tl::types::InputUser {
                         user_id: u.user_id,
                         access_hash: u.access_hash,
                     })
-                }
+                },
                 tl::enums::InputPeer::PeerSelf => tl::enums::InputUser::UserSelf,
                 _ => {
                     return Err(InvocationError::Deserialize(
                         "peer must resolve to a user (bot)".into(),
                     ));
-                }
+                },
             };
             Some(input_user)
         } else {
@@ -422,34 +387,27 @@ impl Client {
         use ferogram_tl_types::{Cursor, Deserializable};
         let bot_input = if let Some(peer) = bot {
             let resolved = peer.into().resolve(self).await?;
-            let input_peer = self
-                .inner
-                .peer_cache
-                .read()
-                .await
-                .peer_to_input(&resolved)?;
+            let input_peer = self.inner.peer_cache.read().await.peer_to_input(&resolved)?;
             let input_user = match input_peer {
                 tl::enums::InputPeer::User(u) => {
                     tl::enums::InputUser::InputUser(tl::types::InputUser {
                         user_id: u.user_id,
                         access_hash: u.access_hash,
                     })
-                }
+                },
                 tl::enums::InputPeer::PeerSelf => tl::enums::InputUser::UserSelf,
                 _ => {
                     return Err(InvocationError::Deserialize(
                         "peer must resolve to a user (bot)".into(),
                     ));
-                }
+                },
             };
             Some(input_user)
         } else {
             None
         };
-        let req = tl::functions::bots::GetBotInfo {
-            bot: bot_input,
-            lang_code: lang_code.to_string(),
-        };
+        let req =
+            tl::functions::bots::GetBotInfo { bot: bot_input, lang_code: lang_code.to_string() };
         let body = self.rpc_call_raw(&req).await?;
         let mut cur = Cursor::from_slice(&body);
         let tl::enums::bots::BotInfo::BotInfo(result) =

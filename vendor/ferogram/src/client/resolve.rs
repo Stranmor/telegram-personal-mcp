@@ -78,7 +78,7 @@ impl Client {
             tl::enums::Peer::Chat(_) => {
                 // Basic groups need no access_hash; always resolvable from ID.
                 Ok(peer)
-            }
+            },
 
             tl::enums::Peer::User(u) => {
                 let req = tl::functions::users::GetUsers {
@@ -91,10 +91,8 @@ impl Client {
                 let mut cur = Cursor::from_slice(&body);
                 let users = Vec::<tl::enums::User>::deserialize(&mut cur)?;
                 // Filter out UserEmpty responses
-                let valid: Vec<_> = users
-                    .into_iter()
-                    .filter(|u| matches!(u, tl::enums::User::User(_)))
-                    .collect();
+                let valid: Vec<_> =
+                    users.into_iter().filter(|u| matches!(u, tl::enums::User::User(_))).collect();
                 if !valid.is_empty() {
                     self.cache_users_slice(&valid).await;
                     return Ok(peer);
@@ -136,19 +134,17 @@ impl Client {
                             self.cache_users_and_chats(&pd.users, &pd.chats).await;
                         }
                         Ok(peer)
-                    }
+                    },
                     Err(e) => Err(e),
                 }
-            }
+            },
 
             tl::enums::Peer::Channel(c) => {
                 let req = tl::functions::channels::GetChannels {
-                    id: vec![tl::enums::InputChannel::InputChannel(
-                        tl::types::InputChannel {
-                            channel_id: c.channel_id,
-                            access_hash: 0,
-                        },
-                    )],
+                    id: vec![tl::enums::InputChannel::InputChannel(tl::types::InputChannel {
+                        channel_id: c.channel_id,
+                        access_hash: 0,
+                    })],
                 };
                 let body: Vec<u8> = self.rpc_call_raw(&req).await?;
                 let mut cur = Cursor::from_slice(&body);
@@ -188,10 +184,10 @@ impl Client {
                             self.cache_users_and_chats(&pd.users, &pd.chats).await;
                         }
                         Ok(peer)
-                    }
+                    },
                     Err(e) => Err(e),
                 }
-            }
+            },
         }
     }
 
@@ -235,15 +231,11 @@ impl Client {
             .first()
             .map(|imp| match imp {
                 tl::enums::ImportedContact::ImportedContact(c) => {
-                    Ok(tl::enums::Peer::User(tl::types::PeerUser {
-                        user_id: c.user_id,
-                    }))
-                }
+                    Ok(tl::enums::Peer::User(tl::types::PeerUser { user_id: c.user_id }))
+                },
             })
             .unwrap_or_else(|| {
-                Err(InvocationError::Deserialize(format!(
-                    "phone {phone} not found on Telegram"
-                )))
+                Err(InvocationError::Deserialize(format!("phone {phone} not found on Telegram")))
             })
     }
 
@@ -255,9 +247,7 @@ impl Client {
         &self,
         hash: &str,
     ) -> Result<tl::enums::Peer, InvocationError> {
-        let req = tl::functions::messages::CheckChatInvite {
-            hash: hash.to_string(),
-        };
+        let req = tl::functions::messages::CheckChatInvite { hash: hash.to_string() };
         let body: Vec<u8> = self.rpc_call_raw(&req).await?;
         let mut cur = Cursor::from_slice(&body);
         let invite = tl::enums::ChatInvite::deserialize(&mut cur)?;
@@ -271,14 +261,14 @@ impl Client {
                         "chatInviteAlready: unrecognised chat variant".into(),
                     )
                 })
-            }
+            },
             tl::enums::ChatInvite::Peek(p) => {
                 let peer = chat_to_peer(&p.chat);
                 self.cache_chats_slice(&[p.chat]).await;
                 peer.ok_or_else(|| {
                     InvocationError::Deserialize("chatInvitePeek: unrecognised chat variant".into())
                 })
-            }
+            },
             tl::enums::ChatInvite::ChatInvite(_) => Err(InvocationError::Deserialize(
                 "not a member of this chat yet; call client.join_by_invite() first".into(),
             )),
@@ -293,9 +283,7 @@ impl Client {
     pub async fn join_link(&self, link: &str) -> Result<tl::enums::InputPeer, InvocationError> {
         let hash = PeerRef::parse_invite_hash(link)
             .ok_or_else(|| InvocationError::Deserialize(format!("invalid invite link: {link}")))?;
-        let req = tl::functions::messages::ImportChatInvite {
-            hash: hash.to_string(),
-        };
+        let req = tl::functions::messages::ImportChatInvite { hash: hash.to_string() };
         let body: Vec<u8> = self.rpc_call_raw(&req).await?;
         let mut cur = Cursor::from_slice(&body);
         let updates = tl::enums::Updates::deserialize(&mut cur)?;
@@ -315,19 +303,17 @@ impl Client {
                             access_hash: hash,
                         }));
                     }
-                }
+                },
                 tl::enums::Chat::Chat(c) => {
                     return Ok(tl::enums::InputPeer::Chat(tl::types::InputPeerChat {
                         chat_id: c.id,
                     }));
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
 
-        Err(InvocationError::Deserialize(
-            "importChatInvite: no chat returned".into(),
-        ))
+        Err(InvocationError::Deserialize("importChatInvite: no chat returned".into()))
     }
 
     /// Peek at an invite link without joining.
@@ -336,9 +322,7 @@ impl Client {
     pub async fn check_invite(&self, link: &str) -> Result<tl::enums::ChatInvite, InvocationError> {
         let hash = PeerRef::parse_invite_hash(link)
             .ok_or_else(|| InvocationError::Deserialize(format!("invalid invite link: {link}")))?;
-        let req = tl::functions::messages::CheckChatInvite {
-            hash: hash.to_string(),
-        };
+        let req = tl::functions::messages::CheckChatInvite { hash: hash.to_string() };
         let body: Vec<u8> = self.rpc_call_raw(&req).await?;
         let mut cur = Cursor::from_slice(&body);
         Ok(tl::enums::ChatInvite::deserialize(&mut cur)?)

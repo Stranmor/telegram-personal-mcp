@@ -32,10 +32,7 @@ impl Client {
     ) -> Result<(), InvocationError> {
         let peer = peer.into().resolve(self).await?;
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
-        let req = tl::functions::messages::GetMessagesReactions {
-            peer: input_peer,
-            id: msg_ids,
-        };
+        let req = tl::functions::messages::GetMessagesReactions { peer: input_peer, id: msg_ids };
         self.rpc_write(&req).await
     }
 
@@ -50,11 +47,8 @@ impl Client {
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
         let part = participant.into().resolve(self).await?;
         let reaction_peer = self.inner.peer_cache.read().await.peer_to_input(&part)?;
-        let req = tl::functions::messages::ReportReaction {
-            peer: input_peer,
-            id: msg_id,
-            reaction_peer,
-        };
+        let req =
+            tl::functions::messages::ReportReaction { peer: input_peer, id: msg_id, reaction_peer };
         let body: Vec<u8> = self.rpc_call_raw(&req).await?;
         Ok(body.len() >= 4 && u32::from_le_bytes(body[..4].try_into().unwrap()) == 0x997275b5)
     }

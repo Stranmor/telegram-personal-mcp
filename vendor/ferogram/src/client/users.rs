@@ -31,7 +31,7 @@ impl Client {
             tl::enums::contacts::Contacts::Contacts(c) => {
                 self.cache_users_slice(&c.users).await;
                 Ok(c.users)
-            }
+            },
             tl::enums::contacts::Contacts::NotModified => Ok(vec![]),
         }
     }
@@ -65,16 +65,10 @@ impl Client {
         let peer = peer.into().resolve(self).await?;
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
         if block {
-            let req = tl::functions::contacts::Block {
-                my_stories_from: false,
-                id: input_peer,
-            };
+            let req = tl::functions::contacts::Block { my_stories_from: false, id: input_peer };
             self.rpc_write(&req).await
         } else {
-            let req = tl::functions::contacts::Unblock {
-                my_stories_from: false,
-                id: input_peer,
-            };
+            let req = tl::functions::contacts::Unblock { my_stories_from: false, id: input_peer };
             self.rpc_write(&req).await
         }
     }
@@ -102,15 +96,7 @@ impl Client {
         phone: impl Into<String>,
         add_phone_privacy_exception: bool,
     ) -> Result<(), InvocationError> {
-        let hash = self
-            .inner
-            .peer_cache
-            .read()
-            .await
-            .users
-            .get(&user_id)
-            .copied()
-            .unwrap_or(0);
+        let hash = self.inner.peer_cache.read().await.users.get(&user_id).copied().unwrap_or(0);
         let req = tl::functions::contacts::AddContact {
             add_phone_privacy_exception,
             id: tl::enums::InputUser::InputUser(tl::types::InputUser {
@@ -145,9 +131,7 @@ impl Client {
                 })
             })
             .collect();
-        let req = tl::functions::contacts::ImportContacts {
-            contacts: contacts_tl,
-        };
+        let req = tl::functions::contacts::ImportContacts { contacts: contacts_tl };
         let body = self.rpc_call_raw(&req).await?;
         let mut cur = Cursor::from_slice(&body);
         let tl::enums::contacts::ImportedContacts::ImportedContacts(result) =
@@ -162,11 +146,7 @@ impl Client {
         offset: i32,
         limit: i32,
     ) -> Result<Vec<tl::enums::Peer>, InvocationError> {
-        let req = tl::functions::contacts::GetBlocked {
-            my_stories_from: false,
-            offset,
-            limit,
-        };
+        let req = tl::functions::contacts::GetBlocked { my_stories_from: false, offset, limit };
         let body = self.rpc_call_raw(&req).await?;
         let mut cur = Cursor::from_slice(&body);
         let (blocked, chats, users) = match tl::enums::contacts::Blocked::deserialize(&mut cur)? {
@@ -281,15 +261,7 @@ impl Client {
         &self,
         user_id: i64,
     ) -> Result<crate::types::UserFull, InvocationError> {
-        let hash = self
-            .inner
-            .peer_cache
-            .read()
-            .await
-            .users
-            .get(&user_id)
-            .copied()
-            .unwrap_or(0);
+        let hash = self.inner.peer_cache.read().await.users.get(&user_id).copied().unwrap_or(0);
         let req = tl::functions::users::GetFullUser {
             id: tl::enums::InputUser::InputUser(tl::types::InputUser {
                 user_id,
@@ -322,32 +294,25 @@ impl Client {
                     channel_id: c.channel_id,
                     access_hash: c.access_hash,
                 })
-            }
+            },
             _ => {
                 return Err(InvocationError::Deserialize(
                     "stats: peer must be a channel or supergroup".into(),
                 ));
-            }
+            },
         };
         // Try broadcast stats first; fall back to megagroup stats on error.
-        let broadcast_req = tl::functions::stats::GetBroadcastStats {
-            dark: false,
-            channel: channel.clone(),
-        };
+        let broadcast_req =
+            tl::functions::stats::GetBroadcastStats { dark: false, channel: channel.clone() };
         if let Ok(body) = self.rpc_call_raw(&broadcast_req).await {
             let mut cur = Cursor::from_slice(&body);
             if let Ok(s) = tl::enums::stats::BroadcastStats::deserialize(&mut cur) {
                 return Ok(crate::ChannelStats::Broadcast(s));
             }
         }
-        let meg_req = tl::functions::stats::GetMegagroupStats {
-            dark: false,
-            channel,
-        };
+        let meg_req = tl::functions::stats::GetMegagroupStats { dark: false, channel };
         let body = self.rpc_call_raw(&meg_req).await?;
         let mut cur = Cursor::from_slice(&body);
-        Ok(crate::ChannelStats::Megagroup(
-            tl::enums::stats::MegagroupStats::deserialize(&mut cur)?,
-        ))
+        Ok(crate::ChannelStats::Megagroup(tl::enums::stats::MegagroupStats::deserialize(&mut cur)?))
     }
 }

@@ -44,11 +44,8 @@ impl Client {
         error: Option<String>,
         shipping_options: Option<Vec<tl::enums::ShippingOption>>,
     ) -> Result<(), InvocationError> {
-        let req = tl::functions::messages::SetBotShippingResults {
-            query_id,
-            error,
-            shipping_options,
-        };
+        let req =
+            tl::functions::messages::SetBotShippingResults { query_id, error, shipping_options };
         self.rpc_write(&req).await
     }
 
@@ -137,8 +134,6 @@ impl Client {
             suggested_post: None,
         };
         let body = self.rpc_call_raw(&req).await?;
-        Ok(self
-            .parse_send_response(&body, &crate::InputMessage::text(""), &peer)
-            .await)
+        Ok(self.parse_send_response(&body, &crate::InputMessage::text(""), &peer).await)
     }
 }

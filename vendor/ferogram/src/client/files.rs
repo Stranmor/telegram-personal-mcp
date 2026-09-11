@@ -53,9 +53,7 @@ impl<'a, D: media::Downloadable + Sync> std::future::IntoFuture for DownloadFile
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            self.client
-                .download_file_inner(self.item, &self.path, self.handle)
-                .await
+            self.client.download_file_inner(self.item, &self.path, self.handle).await
         })
     }
 }
@@ -89,11 +87,9 @@ where
         std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'a>>;
 
     fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
-            self.client
-                .upload_inner(self.source, &self.name, self.handle)
-                .await
-        })
+        Box::pin(
+            async move { self.client.upload_inner(self.source, &self.name, self.handle).await },
+        )
     }
 }
 
@@ -189,9 +185,7 @@ impl Client {
         use crate::resume::{CheckpointStore, DownloadCheckpoint, download_key, sha256_hex};
 
         if !self.inner.experimental.resumable_transfers {
-            return self
-                .download(media, dest as &mut Vec<u8>, Some(handle))
-                .await;
+            return self.download(media, dest as &mut Vec<u8>, Some(handle)).await;
         }
 
         let (loc, dc) = crate::media::location_from_media(media).ok_or_else(|| {
@@ -200,9 +194,8 @@ impl Client {
         let total = crate::media::size_from_media(media).unwrap_or(0) as u64;
         let key = download_key(dc, &loc);
 
-        let store = CheckpointStore::open(self.checkpoint_dir())
-            .await
-            .map_err(InvocationError::Io)?;
+        let store =
+            CheckpointStore::open(self.checkpoint_dir()).await.map_err(InvocationError::Io)?;
 
         // Restore already-downloaded bytes and determine resume offset.
         let resume_offset: i64 = if let Some(cp) = store.load_download(&key).await {
@@ -219,7 +212,7 @@ impl Client {
                     // Align down to 1 MB boundary (Telegram requirement).
                     let mb = 1024 * 1024i64;
                     (restored / mb) * mb
-                }
+                },
                 _ => {
                     // Partial file missing or empty; discard checkpoint and restart.
                     tracing::info!(
@@ -229,7 +222,7 @@ impl Client {
                     store.delete_download(&key).await;
                     dest.clear();
                     0
-                }
+                },
             }
         } else {
             dest.clear();
@@ -294,7 +287,7 @@ impl Client {
                 store.delete_download(&key).await;
                 let _ = tokio::fs::remove_file(store.partial_path(&key)).await;
                 Ok(n)
-            }
+            },
             Err(e) => {
                 // Append whatever we got before the error.
                 let already = dest.len() as i64;
@@ -325,7 +318,7 @@ impl Client {
                     "download interrupted, checkpoint saved",
                 );
                 Err(e)
-            }
+            },
         }
     }
 
@@ -377,22 +370,16 @@ impl Client {
         };
 
         if !self.inner.experimental.resumable_transfers {
-            return self
-                .upload(std::io::Cursor::new(data), name)
-                .handle(handle)
-                .await;
+            return self.upload(std::io::Cursor::new(data), name).handle(handle).await;
         }
 
         if data.is_empty() {
-            return Err(InvocationError::Deserialize(
-                "cannot upload empty file".into(),
-            ));
+            return Err(InvocationError::Deserialize("cannot upload empty file".into()));
         }
 
         let key = upload_key(&data, name);
-        let store = CheckpointStore::open(self.checkpoint_dir())
-            .await
-            .map_err(InvocationError::Io)?;
+        let store =
+            CheckpointStore::open(self.checkpoint_dir()).await.map_err(InvocationError::Io)?;
 
         let total = data.len();
         let big = total > crate::media::BIG_FILE_THRESHOLD;
@@ -411,11 +398,7 @@ impl Client {
                     total_parts,
                     "upload: resuming from checkpoint",
                 );
-                (
-                    cp.file_id,
-                    (cp.last_part + 1) as usize,
-                    cp.mime_type.clone(),
-                )
+                (cp.file_id, (cp.last_part + 1) as usize, cp.mime_type.clone())
             } else {
                 tracing::debug!(target: "ferogram::transfer", "upload: checkpoint expired or incompatible; restarting from scratch");
                 store.delete_upload(&key).await;
@@ -425,11 +408,8 @@ impl Client {
             (crate::media::random_file_id_pub(), 0, String::new())
         };
 
-        let resolved_mime = if cp_mime.is_empty() {
-            crate::media::resolve_mime_pub(name)
-        } else {
-            cp_mime
-        };
+        let resolved_mime =
+            if cp_mime.is_empty() { crate::media::resolve_mime_pub(name) } else { cp_mime };
 
         handle.set_total(total as u64);
         if start_part > 0 {
@@ -465,9 +445,7 @@ impl Client {
             let mut attempt = 0u8;
 
             loop {
-                let res = self
-                    .upload_part_pub(big, file_id, i as i32, total_parts, chunk)
-                    .await;
+                let res = self.upload_part_pub(big, file_id, i as i32, total_parts, chunk).await;
 
                 match res {
                     Ok(_) => break,
@@ -483,7 +461,7 @@ impl Client {
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         delay_ms = (delay_ms * 2).min(30_000);
                         attempt += 1;
-                    }
+                    },
                     Err(e) => {
                         done.store(true, Ordering::Release);
                         let cp = UploadCheckpoint {
@@ -508,7 +486,7 @@ impl Client {
                             "upload interrupted, checkpoint saved",
                         );
                         return Err(e);
-                    }
+                    },
                 }
             }
 
@@ -527,10 +505,7 @@ impl Client {
                     big,
                     name: name.to_string(),
                     mime_type: resolved_mime.clone(),
-                    started_ms: existing
-                        .as_ref()
-                        .map(|c| c.started_ms)
-                        .unwrap_or_else(now_ms),
+                    started_ms: existing.as_ref().map(|c| c.started_ms).unwrap_or_else(now_ms),
                 };
                 store.save_upload(&cp).await;
             }
@@ -542,11 +517,7 @@ impl Client {
         store.delete_upload(&key).await;
         tracing::info!(target: "ferogram::transfer", name, total_parts, "upload complete; checkpoint purged");
 
-        Ok(media::UploadedFile::new(
-            inner,
-            resolved_mime,
-            name.to_string(),
-        ))
+        Ok(media::UploadedFile::new(inner, resolved_mime, name.to_string()))
     }
     /// Upload a file from disk one chunk at a time, without ever loading the full file into memory.
     ///
@@ -585,27 +556,21 @@ impl Client {
 
         let path = path.as_ref();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-        let meta = tokio::fs::metadata(path)
-            .await
-            .map_err(InvocationError::Io)?;
+        let meta = tokio::fs::metadata(path).await.map_err(InvocationError::Io)?;
         let total = meta.len() as usize;
         let big = total > media::BIG_FILE_THRESHOLD;
         let (part_size, total_parts) = media::upload_part_size(total);
         let file_id = random_i64_pub();
 
         // Sniff MIME from first chunk.
-        let mut f = tokio::fs::File::open(path)
-            .await
-            .map_err(InvocationError::Io)?;
+        let mut f = tokio::fs::File::open(path).await.map_err(InvocationError::Io)?;
         let mut header = vec![0u8; part_size.min(65536)];
         let n = f.read(&mut header).await.map_err(InvocationError::Io)?;
         header.truncate(n);
         let mime_type = media::detect_mime_from_bytes(&header, name);
 
         // Reopen from start.
-        let mut f = tokio::fs::File::open(path)
-            .await
-            .map_err(InvocationError::Io)?;
+        let mut f = tokio::fs::File::open(path).await.map_err(InvocationError::Io)?;
 
         if let Some(h) = handle {
             h.set_total(total as u64);
@@ -617,11 +582,7 @@ impl Client {
         loop {
             let mut bytes_read = 0;
             while bytes_read < part_size {
-                match f
-                    .read(&mut buf[bytes_read..])
-                    .await
-                    .map_err(InvocationError::Io)?
-                {
+                match f.read(&mut buf[bytes_read..]).await.map_err(InvocationError::Io)? {
                     0 => break,
                     n => bytes_read += n,
                 }
@@ -734,8 +695,7 @@ impl Client {
             h.set_total(total as u64);
             h.reset_start();
         }
-        self.download_streaming_on_dc(loc, dc, &mut dest, handle)
-            .await
+        self.download_streaming_on_dc(loc, dc, &mut dest, handle).await
     }
 
     /// Download message media and save it directly to a file at `path`.
@@ -777,12 +737,7 @@ impl Client {
         item: &'a D,
         path: impl AsRef<std::path::Path>,
     ) -> DownloadFile<'a, D> {
-        DownloadFile {
-            client: self,
-            item,
-            path: path.as_ref().to_path_buf(),
-            handle: None,
-        }
+        DownloadFile { client: self, item, path: path.as_ref().to_path_buf(), handle: None }
     }
 
     /// Inner implementation behind the [`download_file`] builder.
@@ -810,11 +765,8 @@ impl Client {
                 .download_media_concurrent_on_dc_to_file_pipelined(loc, size, dc, path, handle)
                 .await;
         }
-        let mut file = tokio::fs::File::create(path)
-            .await
-            .map_err(InvocationError::Io)?;
-        self.download_streaming_on_dc(loc, dc, &mut file, handle)
-            .await
+        let mut file = tokio::fs::File::create(path).await.map_err(InvocationError::Io)?;
+        self.download_streaming_on_dc(loc, dc, &mut file, handle).await
     }
 
     /// Download `media` to `path`, choosing a specific quality variant when
@@ -931,12 +883,7 @@ impl Client {
     where
         R: tokio::io::AsyncRead + Unpin + Send + 'a,
     {
-        Upload {
-            client: self,
-            source,
-            name: name.to_string(),
-            handle: None,
-        }
+        Upload { client: self, source, name: name.to_string(), handle: None }
     }
 
     /// Inner implementation behind the [`upload`] builder.
@@ -950,13 +897,9 @@ impl Client {
     ) -> Result<crate::media::UploadedFile, InvocationError> {
         use tokio::io::AsyncReadExt;
         let mut data = Vec::new();
-        source
-            .read_to_end(&mut data)
-            .await
-            .map_err(InvocationError::Io)?;
+        source.read_to_end(&mut data).await.map_err(InvocationError::Io)?;
         if data.len() > crate::media::BIG_FILE_THRESHOLD {
-            self.upload_file_concurrent_pipelined(std::sync::Arc::new(data), name, "", handle)
-                .await
+            self.upload_file_concurrent_pipelined(std::sync::Arc::new(data), name, "", handle).await
         } else {
             self.upload_bytes(&data, name, "", handle).await
         }
@@ -1000,11 +943,7 @@ impl Client {
     /// # Ok(()) }
     /// ```
     pub fn upload_file<'a>(&'a self, path: impl AsRef<std::path::Path>) -> UploadFile<'a> {
-        UploadFile {
-            client: self,
-            path: path.as_ref().to_path_buf(),
-            handle: None,
-        }
+        UploadFile { client: self, path: path.as_ref().to_path_buf(), handle: None }
     }
 
     /// Inner implementation behind the [`upload_file`] builder.
@@ -1017,22 +956,14 @@ impl Client {
     ) -> Result<crate::media::UploadedFile, InvocationError> {
         use tokio::io::AsyncReadExt;
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-        let meta = tokio::fs::metadata(path)
-            .await
-            .map_err(InvocationError::Io)?;
+        let meta = tokio::fs::metadata(path).await.map_err(InvocationError::Io)?;
         let size = meta.len() as usize;
         if size >= crate::media::BIG_FILE_THRESHOLD {
-            return self
-                .upload_file_concurrent_streaming_pipelined(path, name, "", handle)
-                .await;
+            return self.upload_file_concurrent_streaming_pipelined(path, name, "", handle).await;
         }
-        let mut file = tokio::fs::File::open(path)
-            .await
-            .map_err(InvocationError::Io)?;
+        let mut file = tokio::fs::File::open(path).await.map_err(InvocationError::Io)?;
         let mut data = Vec::with_capacity(size);
-        file.read_to_end(&mut data)
-            .await
-            .map_err(InvocationError::Io)?;
+        file.read_to_end(&mut data).await.map_err(InvocationError::Io)?;
         self.upload_bytes(&data, name, "", handle).await
     }
     /// Get every message in the same media group (album) as `msg_id`, given
@@ -1047,9 +978,7 @@ impl Client {
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
 
         // Fetch the seed message first to get grouped_id
-        let seed_ids = vec![tl::enums::InputMessage::Id(tl::types::InputMessageId {
-            id: msg_id,
-        })];
+        let seed_ids = vec![tl::enums::InputMessage::Id(tl::types::InputMessageId { id: msg_id })];
 
         let seed_msgs = match &input_peer {
             tl::enums::InputPeer::Channel(c) => {
@@ -1068,7 +997,7 @@ impl Client {
                     tl::enums::messages::Messages::ChannelMessages(m) => m.messages,
                     tl::enums::messages::Messages::NotModified(_) => vec![],
                 }
-            }
+            },
             _ => {
                 let req = tl::functions::messages::GetMessages { id: seed_ids };
                 let body = self.rpc_call_raw(&req).await?;
@@ -1079,24 +1008,17 @@ impl Client {
                     tl::enums::messages::Messages::ChannelMessages(m) => m.messages,
                     tl::enums::messages::Messages::NotModified(_) => vec![],
                 }
-            }
+            },
         };
 
         // Extract grouped_id from the seed message
         let grouped_id = seed_msgs.iter().find_map(|m| {
-            if let tl::enums::Message::Message(msg) = m {
-                msg.grouped_id
-            } else {
-                None
-            }
+            if let tl::enums::Message::Message(msg) = m { msg.grouped_id } else { None }
         });
 
         // If there's no grouped_id, just return the single message
         let Some(gid) = grouped_id else {
-            return Ok(seed_msgs
-                .into_iter()
-                .map(update::IncomingMessage::from_raw)
-                .collect());
+            return Ok(seed_msgs.into_iter().map(update::IncomingMessage::from_raw).collect());
         };
 
         // Fetch a window of messages around msg_id to find all members of the group
@@ -1123,7 +1045,7 @@ impl Client {
                     tl::enums::messages::Messages::ChannelMessages(m) => m.messages,
                     tl::enums::messages::Messages::NotModified(_) => vec![],
                 }
-            }
+            },
             _ => seed_msgs,
         };
 
@@ -1254,9 +1176,7 @@ impl Client {
         config: crate::client::files::TransferConfig,
     ) -> Result<crate::media::UploadedFile, InvocationError> {
         let path = path.as_ref();
-        let meta = tokio::fs::metadata(path)
-            .await
-            .map_err(InvocationError::Io)?;
+        let meta = tokio::fs::metadata(path).await.map_err(InvocationError::Io)?;
         let size = meta.len() as usize;
 
         // exp: auto-tune uses the fixed MAX_WORKERS_PER_FILE ceiling, not the
@@ -1278,8 +1198,7 @@ impl Client {
         // Round down to nearest 1 KB boundary.
         let chunk_size = (chunk_size / 1024) * 1024;
 
-        self.upload_file_concurrent_streaming_exp(path, workers, chunk_size, handle)
-            .await
+        self.upload_file_concurrent_streaming_exp(path, workers, chunk_size, handle).await
     }
 
     /// # Warning: bypasses connection safety limits
@@ -1371,7 +1290,6 @@ impl Client {
             h.reset_start();
         }
 
-        self.download_concurrent_exp(loc, dc, size, dest, workers, chunk_size as i32, handle)
-            .await
+        self.download_concurrent_exp(loc, dc, size, dest, workers, chunk_size as i32, handle).await
     }
 }

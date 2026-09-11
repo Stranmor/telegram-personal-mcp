@@ -62,10 +62,8 @@ impl Client {
     ) -> Result<Vec<tl::enums::ForumTopic>, InvocationError> {
         let peer = peer.into().resolve(self).await?;
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
-        let req = tl::functions::messages::GetForumTopicsById {
-            peer: input_peer,
-            topics: topic_ids,
-        };
+        let req =
+            tl::functions::messages::GetForumTopicsById { peer: input_peer, topics: topic_ids };
         let body = self.rpc_call_raw(&req).await?;
         let mut cur = Cursor::from_slice(&body);
         let tl::enums::messages::ForumTopics::ForumTopics(result) =
@@ -161,18 +159,14 @@ impl Client {
                     channel_id: c.channel_id,
                     access_hash: c.access_hash,
                 })
-            }
+            },
             _ => {
                 return Err(InvocationError::Deserialize(
                     "toggle_forum: peer must be a supergroup channel".into(),
                 ));
-            }
+            },
         };
-        let req = tl::functions::channels::ToggleForum {
-            channel,
-            enabled,
-            tabs: false,
-        };
+        let req = tl::functions::channels::ToggleForum { channel, enabled, tabs: false };
         self.rpc_write(&req).await
     }
 }

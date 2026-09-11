@@ -26,18 +26,13 @@ impl Client {
         &self,
         stickerset: tl::enums::InputStickerSet,
     ) -> Result<tl::types::messages::StickerSet, InvocationError> {
-        let req = tl::functions::messages::GetStickerSet {
-            stickerset,
-            hash: 0,
-        };
+        let req = tl::functions::messages::GetStickerSet { stickerset, hash: 0 };
         let body = self.rpc_call_raw(&req).await?;
         let mut cur = Cursor::from_slice(&body);
         let tl::enums::messages::StickerSet::StickerSet(result) =
             tl::enums::messages::StickerSet::deserialize(&mut cur)?
         else {
-            return Err(InvocationError::Deserialize(
-                "unexpected StickerSet variant".into(),
-            ));
+            return Err(InvocationError::Deserialize("unexpected StickerSet variant".into()));
         };
         Ok(result)
     }
@@ -49,15 +44,10 @@ impl Client {
         install: bool,
     ) -> Result<Option<tl::enums::messages::StickerSetInstallResult>, InvocationError> {
         if install {
-            let req = tl::functions::messages::InstallStickerSet {
-                stickerset,
-                archived: false,
-            };
+            let req = tl::functions::messages::InstallStickerSet { stickerset, archived: false };
             let body = self.rpc_call_raw(&req).await?;
             let mut cur = Cursor::from_slice(&body);
-            Ok(Some(
-                tl::enums::messages::StickerSetInstallResult::deserialize(&mut cur)?,
-            ))
+            Ok(Some(tl::enums::messages::StickerSetInstallResult::deserialize(&mut cur)?))
         } else {
             let req = tl::functions::messages::UninstallStickerSet { stickerset };
             self.rpc_write(&req).await?;
@@ -94,9 +84,7 @@ impl Client {
         &self,
         document_ids: Vec<i64>,
     ) -> Result<Vec<tl::enums::Document>, InvocationError> {
-        let req = tl::functions::messages::GetCustomEmojiDocuments {
-            document_id: document_ids,
-        };
+        let req = tl::functions::messages::GetCustomEmojiDocuments { document_id: document_ids };
         let body = self.rpc_call_raw(&req).await?;
         let mut cur = Cursor::from_slice(&body);
         Ok(Vec::<tl::enums::Document>::deserialize(&mut cur)?)

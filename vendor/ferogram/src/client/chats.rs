@@ -36,11 +36,11 @@ impl Client {
                     }),
                 };
                 self.rpc_write(&req).await
-            }
+            },
             tl::enums::InputPeer::Chat(c) => {
                 let req = tl::functions::messages::DeleteChat { chat_id: c.chat_id };
                 self.rpc_write(&req).await
-            }
+            },
             _ => Err(InvocationError::Deserialize(
                 "delete_chat: peer must be a chat or channel".into(),
             )),
@@ -60,12 +60,12 @@ impl Client {
                     channel_id: c.channel_id,
                     access_hash: c.access_hash,
                 })
-            }
+            },
             _ => {
                 return Err(InvocationError::Deserialize(
                     "leave_chat: peer must be a channel or supergroup".into(),
                 ));
-            }
+            },
         };
         let req = tl::functions::channels::LeaveChannel { channel };
         self.rpc_write(&req).await
@@ -86,12 +86,9 @@ impl Client {
             _ => vec![],
         };
         // The migrated supergroup is the channel in the chats list.
-        chats
-            .into_iter()
-            .find(|c| matches!(c, tl::enums::Chat::Channel(_)))
-            .ok_or_else(|| {
-                InvocationError::Deserialize("migrate_chat: no channel in response".into())
-            })
+        chats.into_iter().find(|c| matches!(c, tl::enums::Chat::Channel(_))).ok_or_else(|| {
+            InvocationError::Deserialize("migrate_chat: no channel in response".into())
+        })
     }
 
     #[allow(dead_code)]
@@ -130,16 +127,16 @@ impl Client {
                     }),
                 };
                 self.rpc_call_raw(&req).await?
-            }
+            },
             tl::enums::InputPeer::Chat(c) => {
                 let req = tl::functions::messages::GetFullChat { chat_id: c.chat_id };
                 self.rpc_call_raw(&req).await?
-            }
+            },
             _ => {
                 return Err(InvocationError::Deserialize(
                     "get_chat_full: peer must be a chat or channel".into(),
                 ));
-            }
+            },
         };
         // Cache users/chats from the response so subsequent calls work.
         let mut cur = Cursor::from_slice(&body);
@@ -184,19 +181,12 @@ impl Client {
                     users,
                 };
                 self.rpc_write(&req).await
-            }
+            },
             tl::enums::InputPeer::Chat(c) => {
                 // Legacy groups: add one at a time
                 for &id in user_ids {
-                    let hash = self
-                        .inner
-                        .peer_cache
-                        .read()
-                        .await
-                        .users
-                        .get(&id)
-                        .copied()
-                        .unwrap_or(0);
+                    let hash =
+                        self.inner.peer_cache.read().await.users.get(&id).copied().unwrap_or(0);
                     let req = tl::functions::messages::AddChatUser {
                         chat_id: c.chat_id,
                         user_id: tl::enums::InputUser::InputUser(tl::types::InputUser {
@@ -208,7 +198,7 @@ impl Client {
                     self.rpc_write(&req).await?;
                 }
                 Ok(())
-            }
+            },
             _ => Err(InvocationError::Deserialize(
                 "invite_users: peer must be a chat or channel".into(),
             )),
@@ -237,7 +227,7 @@ impl Client {
                     max_id,
                 };
                 self.rpc_write(&req).await
-            }
+            },
             _ => {
                 // For regular chats the server may return an offset != 0, indicating
                 // that more messages remain and we must call again.
@@ -259,7 +249,7 @@ impl Client {
                     }
                 }
                 Ok(())
-            }
+            },
         }
     }
 
@@ -284,11 +274,8 @@ impl Client {
             })
             .collect();
 
-        let req = tl::functions::messages::CreateChat {
-            users,
-            title: title.into(),
-            ttl_period: None,
-        };
+        let req =
+            tl::functions::messages::CreateChat { users, title: title.into(), ttl_period: None };
         let body = self.rpc_call_raw(&req).await?;
         let mut cur = Cursor::from_slice(&body);
         let updates = tl::enums::Updates::deserialize(&mut cur)?;
@@ -389,19 +376,12 @@ impl Client {
                     users,
                 };
                 self.rpc_write(&req).await
-            }
+            },
             tl::enums::InputPeer::Chat(c) => {
                 // Legacy groups: add one at a time
                 for &id in user_ids {
-                    let hash = self
-                        .inner
-                        .peer_cache
-                        .read()
-                        .await
-                        .users
-                        .get(&id)
-                        .copied()
-                        .unwrap_or(0);
+                    let hash =
+                        self.inner.peer_cache.read().await.users.get(&id).copied().unwrap_or(0);
                     let req = tl::functions::messages::AddChatUser {
                         chat_id: c.chat_id,
                         user_id: tl::enums::InputUser::InputUser(tl::types::InputUser {
@@ -413,7 +393,7 @@ impl Client {
                     self.rpc_write(&req).await?;
                 }
                 Ok(())
-            }
+            },
             _ => Err(InvocationError::Deserialize(
                 "invite_users: peer must be a chat or channel".into(),
             )),
@@ -429,10 +409,7 @@ impl Client {
     ) -> Result<(), InvocationError> {
         let peer = peer.into().resolve(self).await?;
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
-        let req = tl::functions::messages::SetHistoryTtl {
-            peer: input_peer,
-            period,
-        };
+        let req = tl::functions::messages::SetHistoryTtl { peer: input_peer, period };
         self.rpc_write(&req).await
     }
 
@@ -444,15 +421,7 @@ impl Client {
         max_id: i64,
         limit: i32,
     ) -> Result<Vec<tl::enums::Chat>, InvocationError> {
-        let hash = self
-            .inner
-            .peer_cache
-            .read()
-            .await
-            .users
-            .get(&user_id)
-            .copied()
-            .unwrap_or(0);
+        let hash = self.inner.peer_cache.read().await.users.get(&user_id).copied().unwrap_or(0);
         let req = tl::functions::messages::GetCommonChats {
             user_id: tl::enums::InputUser::InputUser(tl::types::InputUser {
                 user_id,
@@ -519,11 +488,11 @@ impl Client {
                         crate::participants::Participant::from_channel_participant(p, &user_map)
                     })
                     .collect())
-            }
+            },
             tl::enums::Peer::Chat(_) => {
                 // For basic groups return all members; callers check is_admin flag.
                 self.get_participants(peer, 0).await
-            }
+            },
             _ => Err(InvocationError::Deserialize(
                 "get_chat_administrators: peer must be a chat or channel".into(),
             )),
@@ -545,34 +514,23 @@ impl Client {
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
 
         // Resolve the new owner to InputUser
-        let owner_peer = tl::enums::Peer::User(tl::types::PeerUser {
-            user_id: new_owner_id,
-        });
-        let owner_input = self
-            .inner
-            .peer_cache
-            .read()
-            .await
-            .peer_to_input(&owner_peer)?;
+        let owner_peer = tl::enums::Peer::User(tl::types::PeerUser { user_id: new_owner_id });
+        let owner_input = self.inner.peer_cache.read().await.peer_to_input(&owner_peer)?;
         let user_id = match owner_input {
             tl::enums::InputPeer::User(u) => {
                 tl::enums::InputUser::InputUser(tl::types::InputUser {
                     user_id: u.user_id,
                     access_hash: u.access_hash,
                 })
-            }
+            },
             _ => {
                 return Err(InvocationError::Deserialize(
                     "transfer_chat_ownership: new owner must be a user".into(),
                 ));
-            }
+            },
         };
 
-        let req = tl::functions::messages::EditChatCreator {
-            peer: input_peer,
-            user_id,
-            password,
-        };
+        let req = tl::functions::messages::EditChatCreator { peer: input_peer, user_id, password };
         self.rpc_call_raw(&req).await?;
         Ok(())
     }
@@ -592,12 +550,12 @@ impl Client {
                     channel_id: c.channel_id,
                     access_hash: c.access_hash,
                 })
-            }
+            },
             _ => {
                 return Err(InvocationError::Deserialize(
                     "get_linked_channel: peer must be a channel or supergroup".into(),
                 ));
-            }
+            },
         };
         let req = tl::functions::channels::GetFullChannel { channel };
         let body = self.rpc_call_raw(&req).await?;
@@ -633,12 +591,12 @@ impl Client {
                     channel_id: c.channel_id,
                     access_hash: c.access_hash,
                 })
-            }
+            },
             _ => {
                 return Err(InvocationError::Deserialize(
                     "get_admin_log: peer must be a channel or supergroup".into(),
                 ));
-            }
+            },
         };
         let req = tl::functions::channels::GetAdminLog {
             channel,
@@ -757,10 +715,8 @@ impl Client {
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
         let send_as = send_as_peer.into().resolve(self).await?;
         let send_as_input = self.inner.peer_cache.read().await.peer_to_input(&send_as)?;
-        let req = tl::functions::messages::SaveDefaultSendAs {
-            peer: input_peer,
-            send_as: send_as_input,
-        };
+        let req =
+            tl::functions::messages::SaveDefaultSendAs { peer: input_peer, send_as: send_as_input };
         self.rpc_write(&req).await
     }
 }

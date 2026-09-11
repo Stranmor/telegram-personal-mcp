@@ -74,7 +74,7 @@ impl Client {
                 return Err(InvocationError::Deserialize(
                     "unexpected ExportedChatInvite variant".into(),
                 ));
-            }
+            },
         };
         Ok(result.invite)
     }
@@ -110,7 +110,7 @@ impl Client {
                 return Err(InvocationError::Deserialize(
                     "unexpected ExportedChatInvite variant".into(),
                 ));
-            }
+            },
         };
         Ok(result.invite)
     }
@@ -129,15 +129,8 @@ impl Client {
     ) -> Result<Vec<tl::enums::ExportedChatInvite>, InvocationError> {
         let peer = peer.into().resolve(self).await?;
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
-        let admin_hash = self
-            .inner
-            .peer_cache
-            .read()
-            .await
-            .users
-            .get(&admin_id)
-            .copied()
-            .unwrap_or(0);
+        let admin_hash =
+            self.inner.peer_cache.read().await.users.get(&admin_id).copied().unwrap_or(0);
         let req = tl::functions::messages::GetExportedChatInvites {
             revoked,
             peer: input_peer,
@@ -182,15 +175,8 @@ impl Client {
     ) -> Result<(), InvocationError> {
         let peer = peer.into().resolve(self).await?;
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
-        let admin_hash = self
-            .inner
-            .peer_cache
-            .read()
-            .await
-            .users
-            .get(&admin_id)
-            .copied()
-            .unwrap_or(0);
+        let admin_hash =
+            self.inner.peer_cache.read().await.users.get(&admin_id).copied().unwrap_or(0);
         let req = tl::functions::messages::DeleteRevokedExportedChatInvites {
             peer: input_peer,
             admin_id: tl::enums::InputUser::InputUser(tl::types::InputUser {
@@ -210,15 +196,8 @@ impl Client {
     ) -> Result<(), InvocationError> {
         let peer = peer.into().resolve(self).await?;
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
-        let user_hash = self
-            .inner
-            .peer_cache
-            .read()
-            .await
-            .users
-            .get(&user_id)
-            .copied()
-            .unwrap_or(0);
+        let user_hash =
+            self.inner.peer_cache.read().await.users.get(&user_id).copied().unwrap_or(0);
         let req = tl::functions::messages::HideChatJoinRequest {
             approved: approve,
             peer: input_peer,
@@ -264,15 +243,8 @@ impl Client {
     ) -> Result<Vec<tl::types::ChatInviteImporter>, InvocationError> {
         let peer = peer.into().resolve(self).await?;
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
-        let offset_hash = self
-            .inner
-            .peer_cache
-            .read()
-            .await
-            .users
-            .get(&offset_user_id)
-            .copied()
-            .unwrap_or(0);
+        let offset_hash =
+            self.inner.peer_cache.read().await.users.get(&offset_user_id).copied().unwrap_or(0);
         let req = tl::functions::messages::GetChatInviteImporters {
             requested,
             subscription_expired: false,

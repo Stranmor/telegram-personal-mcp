@@ -60,17 +60,13 @@ impl Client {
             .collect();
 
         // Build user map
-        let user_map: HashMap<i64, tl::enums::User> = raw
-            .users
-            .into_iter()
-            .filter_map(|u| {
-                if let tl::enums::User::User(ref uu) = u {
-                    Some((uu.id, u))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let user_map: HashMap<i64, tl::enums::User> =
+            raw.users
+                .into_iter()
+                .filter_map(|u| {
+                    if let tl::enums::User::User(ref uu) = u { Some((uu.id, u)) } else { None }
+                })
+                .collect();
 
         // Build chat map
         let chat_map: HashMap<i64, tl::enums::Chat> = raw
@@ -121,12 +117,7 @@ impl Client {
                     _ => None,
                 });
 
-                Dialog {
-                    raw: d,
-                    message,
-                    entity,
-                    chat,
-                }
+                Dialog { raw: d, message, entity, chat }
             })
             .collect();
 
@@ -166,14 +157,11 @@ impl Client {
                     max_id: 0,
                 };
                 self.rpc_call_raw(&req).await?;
-            }
+            },
             _ => {
-                let req = tl::functions::messages::ReadHistory {
-                    peer: input_peer,
-                    max_id: 0,
-                };
+                let req = tl::functions::messages::ReadHistory { peer: input_peer, max_id: 0 };
                 self.rpc_call_raw(&req).await?;
-            }
+            },
         }
         Ok(())
     }
@@ -182,10 +170,7 @@ impl Client {
     pub async fn clear_mentions(&self, peer: impl Into<PeerRef>) -> Result<(), InvocationError> {
         let peer = peer.into().resolve(self).await?;
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
-        let req = tl::functions::messages::ReadMentions {
-            peer: input_peer,
-            top_msg_id: None,
-        };
+        let req = tl::functions::messages::ReadMentions { peer: input_peer, top_msg_id: None };
         self.rpc_write(&req).await
     }
 
@@ -202,7 +187,7 @@ impl Client {
                     }),
                 };
                 self.rpc_call_raw(&req).await?;
-            }
+            },
             tl::enums::InputPeer::Chat(c) => {
                 let req = tl::functions::messages::AddChatUser {
                     chat_id: c.chat_id,
@@ -210,12 +195,10 @@ impl Client {
                     fwd_limit: 0,
                 };
                 self.rpc_call_raw(&req).await?;
-            }
+            },
             _ => {
-                return Err(InvocationError::Deserialize(
-                    "cannot join this peer type".into(),
-                ));
-            }
+                return Err(InvocationError::Deserialize("cannot join this peer type".into()));
+            },
         }
         Ok(())
     }
@@ -340,10 +323,10 @@ impl Client {
         let (dialogs_raw, messages, users, chats, count) = match raw {
             tl::enums::messages::Dialogs::Dialogs(d) => {
                 (d.dialogs, d.messages, d.users, d.chats, None)
-            }
+            },
             tl::enums::messages::Dialogs::Slice(d) => {
                 (d.dialogs, d.messages, d.users, d.chats, Some(d.count))
-            }
+            },
             tl::enums::messages::Dialogs::NotModified(d) => return Ok((vec![], Some(d.count))),
         };
 
@@ -361,16 +344,13 @@ impl Client {
             })
             .collect();
 
-        let user_map: std::collections::HashMap<i64, tl::enums::User> = users
-            .into_iter()
-            .filter_map(|u| {
-                if let tl::enums::User::User(ref uu) = u {
-                    Some((uu.id, u))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let user_map: std::collections::HashMap<i64, tl::enums::User> =
+            users
+                .into_iter()
+                .filter_map(|u| {
+                    if let tl::enums::User::User(ref uu) = u { Some((uu.id, u)) } else { None }
+                })
+                .collect();
 
         let chat_map: std::collections::HashMap<i64, tl::enums::Chat> = chats
             .into_iter()
@@ -409,12 +389,7 @@ impl Client {
                     tl::enums::Peer::Channel(c) => chat_map.get(&c.channel_id).cloned(),
                     _ => None,
                 });
-                Dialog {
-                    raw: d,
-                    message,
-                    entity,
-                    chat,
-                }
+                Dialog { raw: d, message, entity, chat }
             })
             .collect();
 

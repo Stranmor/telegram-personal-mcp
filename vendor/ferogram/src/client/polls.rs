@@ -70,11 +70,7 @@ impl Client {
     ) -> Result<(), InvocationError> {
         let peer = peer.into().resolve(self).await?;
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
-        let req = tl::functions::messages::SendVote {
-            peer: input_peer,
-            msg_id,
-            options,
-        };
+        let req = tl::functions::messages::SendVote { peer: input_peer, msg_id, options };
         self.rpc_write(&req).await
     }
 
@@ -86,11 +82,7 @@ impl Client {
     ) -> Result<tl::types::stats::PollStats, InvocationError> {
         let peer = peer.into().resolve(self).await?;
         let input_peer = self.inner.peer_cache.read().await.peer_to_input(&peer)?;
-        let req = tl::functions::stats::GetPollStats {
-            dark: false,
-            peer: input_peer,
-            msg_id,
-        };
+        let req = tl::functions::stats::GetPollStats { dark: false, peer: input_peer, msg_id };
         let body = self.rpc_call_raw(&req).await?;
         let mut cur = Cursor::from_slice(&body);
         let tl::enums::stats::PollStats::PollStats(result) =
