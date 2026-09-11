@@ -4,8 +4,8 @@
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use ferogram::{DcEntry, DcFlags};
 use ferogram::session_backend::PersistedSession;
+use ferogram::{DcEntry, DcFlags};
 use hermes_tdata::TDesktop;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
@@ -62,7 +62,11 @@ fn write_session(path: &Path, session: &PersistedSession) -> Result<(u64, String
         bail!("refusing to overwrite existing session: {}", path.display());
     }
 
-    let temporary = parent.join(format!(".{}.{}.tmp", path.file_name().unwrap().to_string_lossy(), std::process::id()));
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name().unwrap().to_string_lossy(),
+        std::process::id()
+    ));
     session.save(&temporary)?;
     #[cfg(unix)]
     {
@@ -90,8 +94,11 @@ fn main() -> Result<()> {
         None if accounts.len() == 1 => &accounts[0],
         None => {
             let ids: Vec<i64> = accounts.iter().map(|account| account.user_id()).collect();
-            bail!("tdata holds {} accounts; pass --user-id explicitly, one of: {ids:?}", accounts.len())
-        }
+            bail!(
+                "tdata holds {} accounts; pass --user-id explicitly, one of: {ids:?}",
+                accounts.len()
+            )
+        },
     };
     let user_id = account.user_id();
     let dc_id = account.dc_id();
