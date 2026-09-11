@@ -31,7 +31,7 @@ async fn binary_demo_mode_serves_mcp_over_real_stdio() -> anyhow::Result<()> {
 
     let client = ().serve(transport).await?;
     let tools = client.list_all_tools().await?;
-    assert_eq!(tools.len(), 23);
+    assert_eq!(tools.len(), 24);
     assert!(
         tools
             .iter()

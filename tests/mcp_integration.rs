@@ -39,7 +39,7 @@ async fn official_mcp_transport_exposes_structured_tools_and_typed_errors() -> a
     let client = ().serve(client_transport).await?;
 
     let tools = client.list_all_tools().await?;
-    assert_eq!(tools.len(), 307);
+    assert_eq!(tools.len(), 309);
     assert!(
         tools
             .iter()
@@ -362,6 +362,22 @@ async fn official_mcp_transport_exposes_structured_tools_and_typed_errors() -> a
             .and_then(|value| value.pointer("/data/username"))
             .and_then(|value| value.as_str()),
         Some("fixture_account")
+    );
+    assert_eq!(
+        health
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/data/premium"))
+            .and_then(|value| value.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        health
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/data/max_upload_bytes"))
+            .and_then(|value| value.as_u64()),
+        Some(1024 * 1024)
     );
     assert!(
         health

@@ -297,6 +297,169 @@ async fn scheduled_approval_expiry_is_capped_to_the_delivery_time() -> anyhow::R
 }
 
 #[tokio::test]
+async fn current_session_scheduled_rich_text_is_structured_for_send_and_edit() -> anyhow::Result<()>
+{
+    let backend = Arc::new(FakeTelegramBackend::fixture());
+    let bot = Arc::new(FakeApprovalBot::default());
+    let temp = tempfile::tempdir()?;
+    let state_db_path = temp.path().join("state.sqlite");
+    let server = McpServer::with_approval(
+        backend.clone(),
+        McpServerSettings {
+            attachment_cache_dir: temp.path().join("attachments"),
+            max_download_bytes: 1024 * 1024,
+            max_upload_bytes: 1024 * 1024,
+            state_db_path,
+        },
+        ApprovalPolicy {
+            approval_chat_id: 700,
+            approval_user_id: 700,
+            ttl_seconds: 3_600,
+            poll_timeout_seconds: 1,
+        },
+        bot,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = ().serve(client_transport).await?;
+    let schedule_at_unix =
+        i32::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().saturating_add(600))?;
+    let markdown = "# Native scheduled Rich Text\n\n- **Bold**\n- _Italic_";
+
+    let prepared = client
+        .call_tool(
+            CallToolRequestParams::new("prepare_schedule_message").with_arguments(
+                json!({
+                    "chat_id": "@alex",
+                    "text": markdown,
+                    "parse_mode": "rich_markdown",
+                    "source": { "kind": "self_originated" },
+                    "schedule_at_unix": schedule_at_unix
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(prepared.is_error, Some(false));
+    assert_eq!(
+        prepared
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/data/action/parse_mode"))
+            .and_then(|value| value.as_str()),
+        Some("rich_markdown")
+    );
+    let mutation_id = prepared
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/mutation_id"))
+        .and_then(|value| value.as_str())
+        .expect("mutation id");
+    let payload_sha256 = prepared
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/payload_sha256"))
+        .and_then(|value| value.as_str())
+        .expect("payload hash");
+    let applied = client
+        .call_tool(
+            CallToolRequestParams::new("apply_current_session_scheduled_mutation").with_arguments(
+                json!({
+                    "mutation_id": mutation_id,
+                    "approved_payload_sha256": payload_sha256,
+                    "current_session_approval": "Ivan explicitly confirmed this exact scheduled rich-text mutation in the current chat"
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(applied.is_error, Some(false));
+    let scheduled = backend.get_scheduled_messages(None, "@alex").await?;
+    let created = scheduled
+        .iter()
+        .find(|message| message.date == schedule_at_unix)
+        .expect("scheduled rich message");
+    assert_eq!(created.text, None);
+    let rich = backend
+        .get_rich_message_snapshot(None, "@alex", created.message_id)
+        .await?
+        .expect("native rich message snapshot");
+    assert!(rich.block_count > 0);
+
+    let edit_schedule_at_unix = schedule_at_unix.saturating_add(60);
+    let prepared_edit = client
+        .call_tool(
+            CallToolRequestParams::new("prepare_edit_scheduled_message").with_arguments(
+                json!({
+                    "chat_id": "@alex",
+                    "message_id": 301,
+                    "text": markdown,
+                    "parse_mode": "rich_markdown",
+                    "schedule_at_unix": edit_schedule_at_unix
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(prepared_edit.is_error, Some(false));
+    let edit_mutation_id = prepared_edit
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/mutation_id"))
+        .and_then(|value| value.as_str())
+        .expect("edit mutation id");
+    let edit_payload_sha256 = prepared_edit
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/payload_sha256"))
+        .and_then(|value| value.as_str())
+        .expect("edit payload hash");
+    let applied_edit = client
+        .call_tool(
+            CallToolRequestParams::new("apply_current_session_scheduled_mutation").with_arguments(
+                json!({
+                    "mutation_id": edit_mutation_id,
+                    "approved_payload_sha256": edit_payload_sha256,
+                    "current_session_approval": "Ivan explicitly confirmed this exact scheduled rich-text edit in the current chat"
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(applied_edit.is_error, Some(false));
+    let edited = backend
+        .get_scheduled_messages(None, "@alex")
+        .await?
+        .into_iter()
+        .find(|message| message.message_id == 301)
+        .expect("edited scheduled rich message");
+    assert_eq!(edited.text, None);
+    assert_eq!(edited.date, edit_schedule_at_unix);
+    assert!(
+        backend
+            .get_rich_message_snapshot(None, "@alex", 301)
+            .await?
+            .is_some_and(|snapshot| snapshot.block_count > 0)
+    );
+
+    client.cancel().await?;
+    server_task.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn rich_markdown_keeps_its_kind_through_button_approval_and_dispatch() -> anyhow::Result<()> {
     let backend = Arc::new(FakeTelegramBackend::fixture());
     let bot = Arc::new(FakeApprovalBot::default());
