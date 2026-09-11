@@ -29,6 +29,7 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 fs2 = "0.4"
+hermes-tdata = { path = "../hermes-smm-closure.3tN3xA/crates/hermes-tdata" }
 # Keep the Telegram client on the latest stable compatible release; auth and
 # message-page migrations are covered by the real backend and login tests.
 ferogram = { version = "=0.6.4", features = ["html", "serde"] }
