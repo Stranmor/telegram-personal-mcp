@@ -52,7 +52,7 @@ full 307-tool catalog behind `search_tools`, `describe_tool`,
 `invoke_read_only_tool`, and `invoke_tool`, avoiding a multi-megabyte discovery
 payload for every MCP client without removing capability.
 
-`v0.1.0` is the first public prerelease. Release evidence is deterministic
+`v0.2.0` is the current public prerelease. Release evidence is deterministic
 and credential-free: CI verifies the real binary, package, stdio transport, and
 demo/fake workflow, while live Telegram authentication and delivery remain an
 explicit prerelease boundary.
@@ -382,7 +382,7 @@ Install the current prerelease from its exact Git tag:
 ```bash
 cargo install --locked \
   --git https://github.com/Stranmor/telegram-personal-mcp.git \
-  --tag v0.1.0
+  --tag v0.2.0
 ```
 
 The project is not published to crates.io. For a source checkout or local
