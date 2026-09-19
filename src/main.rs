@@ -106,6 +106,7 @@ enum MaintenanceCommand {
     ExpireStale {
         /// Print the exact plan but do not write the database or archive.
         #[arg(long)]
+        dry_run: bool,
         /// Explicit confirmation for one unknown outcome, as approval and message identifiers joined by '='.
         #[arg(long = "confirm-unknown", value_name = "PAIR")]
         confirm_unknown: Vec<String>,
