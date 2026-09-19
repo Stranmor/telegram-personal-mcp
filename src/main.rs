@@ -93,6 +93,25 @@ enum Command {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// Perform explicitly scoped, offline approval-ledger maintenance.
+    Maintenance {
+        #[command(subcommand)]
+        command: MaintenanceCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MaintenanceCommand {
+    /// Confirm supplied delivery receipts and archive/delete dormant drafts.
+    ExpireStale {
+        /// Print the exact plan but do not write the database or archive.
+        #[arg(long)]
+        /// Explicit confirmation for one unknown outcome, as approval and message identifiers joined by '='.
+        #[arg(long = "confirm-unknown", value_name = "PAIR")]
+        confirm_unknown: Vec<String>,
+        #[arg(long)]
+        archive_path: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -160,6 +179,21 @@ async fn main() -> Result<()> {
         },
         Some(Command::Daemon) => return daemon(&args).await,
         Some(Command::Direct) => return direct(&args).await,
+        Some(Command::Maintenance {
+            command: MaintenanceCommand::ExpireStale { dry_run, confirm_unknown, archive_path },
+        }) => {
+            let state_db_path = effective_server_settings(&args).state_db_path;
+            let report = telegram_personal_mcp::maintenance::expire_stale(
+                &state_db_path,
+                &telegram_personal_mcp::maintenance::ExpireStaleOptions {
+                    dry_run: *dry_run,
+                    archive_path: archive_path.clone(),
+                    confirm_unknown: confirm_unknown.clone(),
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        },
         Some(Command::Serve) | None => return serve_proxy(&args).await,
     }
 }
