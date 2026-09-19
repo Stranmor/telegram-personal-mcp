@@ -14,6 +14,15 @@ and releases use [Semantic Versioning](https://semver.org/).
   without active approvals. This is a manual state-maintenance operation; it
   never sends Telegram messages or creates approval cards.
 
+### Fixed
+- Completed a manual approval-ledger cleanup on 2026-09-19: three dormant
+  `outcome_unknown` approvals were bound to their independently verified
+  Telegram receipts (now `applied`), and 33 prepared mutations plus 17
+  prepared sends without active approvals were archived to
+  `archive/prepared-20260919.json` and removed after a full database backup.
+  No message was sent and no approval card was created; the operation touched
+  only explicitly scoped historical rows.
+
 - Added `prepare_schedule_file_message`, an immutable approval-backed scheduled
   photo/media mutation with exact artifact hashes, source/target provenance,
   caption parse mode, schedule-time expiry, non-replaying uncertain recovery,
