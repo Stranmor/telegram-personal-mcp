@@ -7,6 +7,7 @@ pub mod fake;
 mod fs_security;
 mod invite;
 pub mod ledger;
+pub mod maintenance;
 pub mod mcp;
 pub mod message_cache;
 pub mod mutation_ledger;

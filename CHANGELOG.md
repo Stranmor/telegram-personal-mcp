@@ -8,6 +8,11 @@ and releases use [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Added the operator-only `maintenance expire-stale` command. It supports a
+  read-only `--dry-run`, requires explicit offline delivery evidence to bind
+  dormant unknown outcomes, and archives then deletes only prepared rows
+  without active approvals. This is a manual state-maintenance operation; it
+  never sends Telegram messages or creates approval cards.
 
 - Added `prepare_schedule_file_message`, an immutable approval-backed scheduled
   photo/media mutation with exact artifact hashes, source/target provenance,
