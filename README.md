@@ -666,6 +666,11 @@ permissions and must already be protected by the operator. Neither store is
 encrypted or automatically purged by this project. Apply an appropriate
 retention policy.
 
+Historical note (2026-09-19): dormant prepared drafts without active approvals
+were archived to `archive/prepared-20260919.json` and removed after a full
+database backup; three dormant unknown outcomes were bound to verified
+receipts. The operation sent nothing and created no approval cards.
+
 ## Operational Error Semantics
 
 Important stable error codes include:
