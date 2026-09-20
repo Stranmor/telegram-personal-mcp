@@ -15313,6 +15313,9 @@ impl McpServer {
                         granted_by = grant_use.granted_by,
                         "owner grant covered this mutation; approval card skipped"
                     );
+                    self.mutation_ledger
+                        .mark_approval_card_skipped(&request.public.approval_id)
+                        .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
                     if request.public.execution_owner == MutationExecutionOwner::ExternalOwner {
                         self.mutation_ledger
                             .mark_external_owner_approved(&request.public.approval_id, now_unix())

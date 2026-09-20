@@ -967,6 +967,32 @@ impl MutationLedger {
         get_approval_from_connection(&connection, approval_id)
     }
 
+    /// A granted mutation needs no card at all: move it straight from
+    /// `dispatching_card` to `pending`, the state the apply path accepts, and
+    /// leave no bot message behind.
+    pub fn mark_approval_card_skipped(&self, approval_id: &str) -> rusqlite::Result<()> {
+        let connection = self.connection()?;
+        let changed = connection.execute(
+            "UPDATE mutation_approvals
+             SET state = 'pending', last_error_code = NULL
+             WHERE approval_id = ?1 AND state = 'dispatching_card'",
+            params![approval_id],
+        )?;
+        if changed > 0 {
+            return Ok(());
+        }
+        let existing =
+            self.get_approval(approval_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if existing.state == MutationApprovalState::Pending {
+            Ok(())
+        } else {
+            Err(state_error(format!(
+                "mutation approval {approval_id} could not skip its card from state {:?}",
+                existing.state
+            )))
+        }
+    }
+
     pub fn mark_approval_card_delivered(
         &self,
         approval_id: &str,
@@ -1063,7 +1089,7 @@ impl MutationLedger {
                  next_retry_at = ?2, last_error_code = NULL,
                  last_error_message = NULL
             WHERE approval_id = ?1
-              AND state = 'pending'
+              AND state IN ('pending', 'dispatching_card')
               AND NOT EXISTS (
                   SELECT 1 FROM mutation_external_handoffs
                   WHERE approval_id = ?1
