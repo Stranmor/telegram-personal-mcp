@@ -13505,7 +13505,7 @@ impl McpServer {
                     .map_err(Json(ToolOutcome::failure))?;
                 let final_state = self
                     .reload_approval(&request.public.approval_id)
-                    .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
+                    .map_err(|error| Json(ToolOutcome::failure(error)))?;
                 return Ok(Json(ToolOutcome::success(final_state)));
             }
         }
