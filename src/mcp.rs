@@ -13502,7 +13502,7 @@ impl McpServer {
                 );
                 self.complete_approval_send(runtime, request.public.clone())
                     .await
-                    .map_err(Json(ToolOutcome::failure))?;
+                    .map_err(|error| Json(ToolOutcome::failure(error)))?;
                 let final_state = self
                     .reload_approval(&request.public.approval_id)
                     .map_err(|error| Json(ToolOutcome::failure(error)))?;
