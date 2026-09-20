@@ -38216,12 +38216,31 @@ mod tests {
 /// for the known peer-shaped fields instead of matching every variant.
 fn mutation_target_peer(action: &MutationAction) -> Option<String> {
     let value = serde_json::to_value(action).ok()?;
-    for key in ["chat_id", "target_chat_id", "peer_ref", "user_id"] {
-        if let Some(found) = value.get(key).and_then(serde_json::Value::as_str) {
-            if !found.trim().is_empty() {
-                return Some(found.to_string());
+    // Actions serialize as nested variants (`{"send_file":{"chat_id":…}}`), so
+    // the peer is searched depth-first rather than at the top level only.
+    fn search(value: &serde_json::Value, depth: usize) -> Option<String> {
+        if depth > 4 {
+            return None;
+        }
+        match value {
+            serde_json::Value::Object(map) => {
+                for key in ["chat_id", "target_chat_id", "peer_ref", "user_id"] {
+                    if let Some(found) = map.get(key).and_then(serde_json::Value::as_str) {
+                        if !found.trim().is_empty() {
+                            return Some(found.to_string());
+                        }
+                    }
+                    if let Some(found) = map.get(key).and_then(serde_json::Value::as_i64) {
+                        return Some(found.to_string());
+                    }
+                }
+                map.values().find_map(|nested| search(nested, depth + 1))
             }
+            serde_json::Value::Array(items) => {
+                items.iter().find_map(|nested| search(nested, depth + 1))
+            }
+            _ => None,
         }
     }
-    None
+    search(&value, 0)
 }
