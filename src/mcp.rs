@@ -15321,7 +15321,13 @@ impl McpServer {
                         self.mutation_ledger
                             .mark_approval_applying(&request.public.approval_id, now_unix())
                             .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
-                        self.complete_mutation_application(runtime, request.public.clone())
+                        // The application path requires the reloaded state: the
+                        // snapshot captured before the transition still says
+                        // Pending, and applying from it fails with a retry error.
+                        let applying = self
+                            .reload_mutation_approval(&request.public.approval_id)
+                            .map_err(|error| Json(ToolOutcome::failure(error)))?;
+                        self.complete_mutation_application(runtime, applying)
                             .await
                             .map_err(|error| Json(ToolOutcome::failure(error)))?;
                     }
