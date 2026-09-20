@@ -38217,7 +38217,7 @@ mod tests {
 fn mutation_target_peer(action: &MutationAction) -> Option<String> {
     let value = serde_json::to_value(action).ok()?;
     for key in ["chat_id", "target_chat_id", "peer_ref", "user_id"] {
-        if let Some(found) = value.get(key).and_then(Value::as_str) {
+        if let Some(found) = value.get(key).and_then(serde_json::Value::as_str) {
             if !found.trim().is_empty() {
                 return Some(found.to_string());
             }
