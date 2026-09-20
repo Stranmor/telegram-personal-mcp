@@ -13481,6 +13481,34 @@ impl McpServer {
                 runtime.policy.ttl_seconds,
             )
             .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
+        // Owner grant: the owner authorized this host in an interactive chat
+        // ("да, отправляй"). The card is skipped only for the exact peers and
+        // the message budget he granted, the permission expires on its own and
+        // every use is journalled; with no live grant this path is unchanged.
+        if let Some(path) = runtime.policy.owner_grant_file.as_deref() {
+            let peers = [
+                prepared.public.chat_id.as_str(),
+                prepared.public.target.username.as_deref().unwrap_or(""),
+                prepared.public.target.display_name.as_str(),
+            ];
+            if let Some(grant_use) = crate::approval::consume_owner_grant(path, &peers, now_unix())
+            {
+                tracing::info!(
+                    target: "telegram_personal_mcp",
+                    target = %grant_use.target,
+                    remaining_messages = grant_use.remaining_messages,
+                    granted_by = grant_use.granted_by,
+                    "owner grant covered this send; approval card skipped"
+                );
+                self.complete_approval_send(runtime, request.public.clone())
+                    .await
+                    .map_err(Json(ToolOutcome::failure))?;
+                let final_state = self
+                    .reload_approval(&request.public.approval_id)
+                    .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
+                return Ok(Json(ToolOutcome::success(final_state)));
+            }
+        }
         if !request.should_dispatch_card {
             return Ok(Json(ToolOutcome::success(request.public)));
         }
@@ -15227,7 +15255,10 @@ impl McpServer {
         .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
         if args.execution_owner == MutationExecutionOwner::ManagedMcp
             && matches!(prepared.public.action, MutationAction::TranscribeAudio { .. })
-            && request.public.state == MutationApprovalState::Pending
+            && matches!(
+                request.public.state,
+                MutationApprovalState::Pending | MutationApprovalState::DispatchingCard
+            )
         {
             // Standing operator authorization (2026-09-11): requesting a
             // server-side voice/video-note transcription is a routine

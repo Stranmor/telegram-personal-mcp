@@ -569,8 +569,42 @@ fn approval_from_env() -> Result<Option<(ApprovalPolicy, Arc<dyn ApprovalBot>)>>
     let api_base = nonempty_env("TELEGRAM_MCP_APPROVAL_API_BASE")
         .unwrap_or_else(|| "https://api.telegram.org".to_string());
     let proxy = nonempty_env("TELEGRAM_MCP_PROXY");
-    let policy =
-        ApprovalPolicy { approval_chat_id, approval_user_id, ttl_seconds, poll_timeout_seconds };
+    let owner_grant_file =
+        nonempty_env("TELEGRAM_MCP_OWNER_GRANT_FILE").map(std::path::PathBuf::from);
+    if let Some(path) = &owner_grant_file {
+        match std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<crate::approval::OwnerGrant>(&raw).ok())
+        {
+            Some(grant)
+                if grant.is_live(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
+                ) =>
+            {
+                tracing::info!(
+                target: "telegram_personal_mcp",
+                remaining_messages = grant.remaining_messages,
+                expires_at_unix = grant.expires_at_unix,
+                peers = ?grant.allow_peers,
+                "owner grant is live: sends to these peers skip the approval card"
+                )
+            },
+            _ => tracing::info!(
+                target: "telegram_personal_mcp",
+                "owner grant file present but not live; approval cards stay mandatory"
+            ),
+        }
+    }
+    let policy = ApprovalPolicy {
+        approval_chat_id,
+        approval_user_id,
+        ttl_seconds,
+        poll_timeout_seconds,
+        owner_grant_file,
+    };
     policy.validate().map_err(anyhow::Error::msg)?;
     let bot: Arc<dyn ApprovalBot> =
         if let Some(path) = nonempty_env("TELEGRAM_MCP_APPROVAL_FANOUT_DB").map(PathBuf::from) {

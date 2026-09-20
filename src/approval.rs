@@ -56,6 +56,10 @@ pub struct ApprovalPolicy {
     pub approval_user_id: i64,
     pub ttl_seconds: u64,
     pub poll_timeout_seconds: u64,
+    /// Owner grant file: an explicit, time-boxed permission (peers + message
+    /// budget + expiry) that lets an interactive session dispatch without a
+    /// confirmation card. `None` keeps the card path exactly as it was.
+    pub owner_grant_file: Option<std::path::PathBuf>,
 }
 
 impl ApprovalPolicy {
@@ -72,6 +76,11 @@ impl ApprovalPolicy {
         if !(1..=50).contains(&self.poll_timeout_seconds) {
             return Err("poll_timeout_seconds must be between 1 and 50 seconds");
         }
+        if let Some(path) = &self.owner_grant_file {
+            if !path.is_absolute() {
+                return Err("owner_grant_file must be absolute");
+            }
+        }
         Ok(())
     }
 }
@@ -83,7 +92,119 @@ impl Default for ApprovalPolicy {
             approval_user_id: 0,
             ttl_seconds: 24 * 60 * 60,
             poll_timeout_seconds: 5,
+            owner_grant_file: None,
         }
+    }
+}
+
+/// An owner authorization recorded on this host, never inferred.
+///
+/// The owner may reply in chat "да, отправляй" while we are working together;
+/// that permission becomes this file instead of a vibe: it names who granted
+/// it, which peers it covers, how many messages remain, and when it dies.
+/// Every use is journalled, the budget is decremented atomically, and an
+/// expired or exhausted grant is simply ignored — so an autonomous contour
+/// gains nothing unless the owner wrote a grant for exactly its target.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OwnerGrant {
+    pub granted_by: i64,
+    pub granted_at_unix: i64,
+    pub expires_at_unix: i64,
+    pub remaining_messages: u32,
+    #[serde(default)]
+    pub allow_peers: Vec<String>,
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OwnerGrantUse {
+    pub granted_by: i64,
+    pub target: String,
+    pub message: String,
+    pub remaining_messages: u32,
+    pub expires_at_unix: i64,
+    pub reason: String,
+}
+
+fn normalize_peer(value: &str) -> String {
+    let trimmed = value.trim().trim_start_matches("https://t.me/").trim_start_matches("t.me/");
+    trimmed.trim_start_matches('@').to_ascii_lowercase()
+}
+
+impl OwnerGrant {
+    pub fn is_live(&self, now_unix: i64) -> bool {
+        self.granted_by > 0 && self.remaining_messages > 0 && now_unix < self.expires_at_unix
+    }
+
+    pub fn allows(&self, peers: &[&str]) -> bool {
+        peers.iter().filter(|peer| !peer.trim().is_empty()).any(|peer| {
+            let wanted = normalize_peer(peer);
+            self.allow_peers.iter().any(|allowed| normalize_peer(allowed) == wanted)
+        })
+    }
+}
+
+/// Consume one message from a live owner grant, or `None` when there is no
+/// grant, it expired, its budget ran out, or the peers are not covered.
+pub fn consume_owner_grant(
+    path: &std::path::Path,
+    peers: &[&str],
+    now_unix: i64,
+) -> Option<OwnerGrantUse> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let mut grant: OwnerGrant = serde_json::from_str(&raw).ok()?;
+    if !grant.is_live(now_unix) || !grant.allows(peers) {
+        return None;
+    }
+    grant.remaining_messages = grant.remaining_messages.saturating_sub(1);
+    let target = peers
+        .iter()
+        .find(|peer| !peer.trim().is_empty())
+        .map(|peer| (*peer).to_string())
+        .unwrap_or_default();
+    let use_record = OwnerGrantUse {
+        granted_by: grant.granted_by,
+        target,
+        message: String::new(),
+        remaining_messages: grant.remaining_messages,
+        expires_at_unix: grant.expires_at_unix,
+        reason: grant.reason.clone(),
+    };
+    write_grant_atomically(path, &grant)?;
+    journal_grant_use(path, &use_record);
+    Some(use_record)
+}
+
+fn write_grant_atomically(path: &std::path::Path, grant: &OwnerGrant) -> Option<()> {
+    let payload = serde_json::to_vec_pretty(grant).ok()?;
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, payload).ok()?;
+    std::fs::set_permissions(
+        &temp,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .ok()?;
+    std::fs::rename(&temp, path).ok()?;
+    Some(())
+}
+
+fn journal_grant_use(path: &std::path::Path, use_record: &OwnerGrantUse) {
+    let log_path = path.with_extension("json.log");
+    let line = match serde_json::to_string(use_record) {
+        Ok(line) => line,
+        Err(_) => return,
+    };
+    if std::fs::metadata(&log_path).is_err() {
+        let _ = std::fs::write(&log_path, b"");
+        let _ = std::fs::set_permissions(
+            &log_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        );
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(&log_path) {
+        use std::io::Write;
+        let _ = writeln!(file, "{line}");
     }
 }
 
