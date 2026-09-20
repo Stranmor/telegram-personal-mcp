@@ -15288,6 +15288,41 @@ impl McpServer {
             }
             return Ok(Json(ToolOutcome::success(current)));
         }
+        // Owner grant also covers mutations (file sends, edits, deletes): the
+        // owner authorized exactly these peers, the budget and the window, and
+        // every use is journalled. External-owner mutations are relayed the
+        // same way a card press would relay them; nothing else changes.
+        if let Some(path) = runtime.policy.owner_grant_file.as_deref() {
+            if let Some(peer) = mutation_target_peer(&request.public.action) {
+                if let Some(grant_use) =
+                    crate::approval::consume_owner_grant(path, &[peer.as_str()], now_unix())
+                {
+                    tracing::info!(
+                        target: "telegram_personal_mcp",
+                        target = %grant_use.target,
+                        remaining_messages = grant_use.remaining_messages,
+                        granted_by = grant_use.granted_by,
+                        "owner grant covered this mutation; approval card skipped"
+                    );
+                    if request.public.execution_owner == MutationExecutionOwner::ExternalOwner {
+                        self.mutation_ledger
+                            .mark_external_owner_approved(&request.public.approval_id, now_unix())
+                            .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
+                    } else {
+                        self.mutation_ledger
+                            .mark_approval_applying(&request.public.approval_id, now_unix())
+                            .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
+                        self.complete_mutation_application(runtime, request.public.clone())
+                            .await
+                            .map_err(|error| Json(ToolOutcome::failure(error)))?;
+                    }
+                    let final_state = self
+                        .reload_mutation_approval(&request.public.approval_id)
+                        .map_err(|error| Json(ToolOutcome::failure(error)))?;
+                    return Ok(Json(ToolOutcome::success(final_state)));
+                }
+            }
+        }
         if !request.should_dispatch_card {
             return Ok(Json(ToolOutcome::success(request.public)));
         }
@@ -38174,4 +38209,19 @@ mod tests {
             "STATE_INTEGRITY_ERROR"
         );
     }
+}
+
+/// The peer a mutation addresses, read from its serialized action. Mutations
+/// carry their target under different keys per kind, so the grant check looks
+/// for the known peer-shaped fields instead of matching every variant.
+fn mutation_target_peer(action: &MutationAction) -> Option<String> {
+    let value = serde_json::to_value(action).ok()?;
+    for key in ["chat_id", "target_chat_id", "peer_ref", "user_id"] {
+        if let Some(found) = value.get(key).and_then(Value::as_str) {
+            if !found.trim().is_empty() {
+                return Some(found.to_string());
+            }
+        }
+    }
+    None
 }
