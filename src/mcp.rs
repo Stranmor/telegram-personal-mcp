@@ -15293,9 +15293,18 @@ impl McpServer {
         // every use is journalled. External-owner mutations are relayed the
         // same way a card press would relay them; nothing else changes.
         if let Some(path) = runtime.policy.owner_grant_file.as_deref() {
-            if let Some(peer) = mutation_target_peer(&request.public.action) {
+            let peers = mutation_grant_peers(&request.public.action);
+            if peers.is_empty() {
+                tracing::warn!(
+                    target: "telegram_personal_mcp",
+                    action = %serde_json::to_string(&request.public.action).unwrap_or_default(),
+                    "owner grant: no peer-shaped field in the mutation action; card stays mandatory"
+                );
+            }
+            let peer_refs: Vec<&str> = peers.iter().map(String::as_str).collect();
+            if !peer_refs.is_empty() {
                 if let Some(grant_use) =
-                    crate::approval::consume_owner_grant(path, &[peer.as_str()], now_unix())
+                    crate::approval::consume_owner_grant(path, &peer_refs, now_unix())
                 {
                     tracing::info!(
                         target: "telegram_personal_mcp",
@@ -38214,33 +38223,32 @@ mod tests {
 /// The peer a mutation addresses, read from its serialized action. Mutations
 /// carry their target under different keys per kind, so the grant check looks
 /// for the known peer-shaped fields instead of matching every variant.
-fn mutation_target_peer(action: &MutationAction) -> Option<String> {
-    let value = serde_json::to_value(action).ok()?;
-    // Actions serialize as nested variants (`{"send_file":{"chat_id":…}}`), so
-    // the peer is searched depth-first rather than at the top level only.
-    fn search(value: &serde_json::Value, depth: usize) -> Option<String> {
-        if depth > 4 {
-            return None;
-        }
-        match value {
-            serde_json::Value::Object(map) => {
-                for key in ["chat_id", "target_chat_id", "peer_ref", "user_id"] {
-                    if let Some(found) = map.get(key).and_then(serde_json::Value::as_str) {
-                        if !found.trim().is_empty() {
-                            return Some(found.to_string());
-                        }
-                    }
-                    if let Some(found) = map.get(key).and_then(serde_json::Value::as_i64) {
-                        return Some(found.to_string());
+/// Peer candidates for a mutation: the first peer-shaped field found in the
+/// serialized action, plus every allowed grant peer that literally occurs in
+/// that JSON (a mutation may address a peer through a nested or differently
+/// named field; containment is a safe superset because the grant itself is the
+/// owner's explicit authorization).
+fn mutation_grant_peers(action: &MutationAction) -> Vec<String> {
+    let mut peers: Vec<String> = Vec::new();
+    if let Some(peer) = mutation_target_peer(action) {
+        peers.push(peer);
+    }
+    if let Ok(serialized) = serde_json::to_string(action) {
+        if let Ok(raw) = std::fs::read_to_string(
+            std::env::var("TELEGRAM_MCP_OWNER_GRANT_FILE").unwrap_or_default(),
+        ) {
+            if let Ok(grant) = serde_json::from_str::<crate::approval::OwnerGrant>(&raw) {
+                for allowed in grant.allow_peers {
+                    let needle = allowed.trim().trim_start_matches('@').to_string();
+                    if !needle.is_empty() && serialized.contains(&needle) && !peers.contains(&allowed)
+                    {
+                        peers.push(allowed);
                     }
                 }
-                map.values().find_map(|nested| search(nested, depth + 1))
             }
-            serde_json::Value::Array(items) => {
-                items.iter().find_map(|nested| search(nested, depth + 1))
-            }
-            _ => None,
         }
     }
-    search(&value, 0)
+    peers
 }
+
+fn mutation_target_peer(action: &MutationAction) -> Option<String> {
