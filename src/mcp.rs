@@ -13500,6 +13500,9 @@ impl McpServer {
                     granted_by = grant_use.granted_by,
                     "owner grant covered this send; approval card skipped"
                 );
+                self.send_ledger
+                    .mark_approval_sending(&request.public.approval_id, now_unix())
+                    .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
                 self.complete_approval_send(runtime, request.public.clone())
                     .await
                     .map_err(|error| Json(ToolOutcome::failure(error)))?;
