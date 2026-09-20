@@ -574,7 +574,7 @@ fn approval_from_env() -> Result<Option<(ApprovalPolicy, Arc<dyn ApprovalBot>)>>
     if let Some(path) = &owner_grant_file {
         match std::fs::read_to_string(path)
             .ok()
-            .and_then(|raw| serde_json::from_str::<crate::approval::OwnerGrant>(&raw).ok())
+            .and_then(|raw| serde_json::from_str::<telegram_personal_mcp::approval::OwnerGrant>(&raw).ok())
         {
             Some(grant)
                 if grant.is_live(
