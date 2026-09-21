@@ -66,7 +66,12 @@ pub struct SenderHandle {
 }
 
 /// Spawn the sender task.  Returns a [`SenderHandle`] for the client and an
-/// `mpsc::Receiver<FrameEvent>` for receiving update bodies and errors.
+///
+/// The returned handle owns both channels: dropping `reconnect_tx` while the
+/// worker is healthy closes `reconnect_rx`, and the biased select in
+/// `sender_loop` then observes that closed branch immediately and exits
+/// before the first RPC. Transfer workers therefore retain it for the whole
+/// connection lifetime; dropping the handle is the clean shutdown signal.
 pub fn spawn_sender_task(
     stream: TcpStream,
     enc: EncryptedSession,
@@ -211,6 +216,11 @@ async fn sender_loop(
 #[derive(Clone)]
 pub struct PipelinedSender {
     rpc_tx: mpsc::Sender<RpcEnqueue>,
+    /// Keep the reconnect sender alive while this worker is healthy. Dropping
+    /// it at construction closes `reconnect_rx`; because sender_loop uses a
+    /// biased select, that closed branch wins immediately and the worker exits
+    /// before it can process its first RPC.
+    _reconnect_tx: mpsc::Sender<ReconnectRequest>,
     /// Flipped to `false` by the background drain task once the sender
     /// task reports a connection error. Callers check this after a failed
     /// `enqueue` to decide whether to open a fresh `PipelinedSender` rather
@@ -280,9 +290,10 @@ pub fn spawn_pipelined(
 ) -> PipelinedSender {
     let (handle, mut frame_rx) = spawn_sender_task(stream, enc, frame_kind, perm_auth_key);
 
-    // Dropping reconnect_tx lets the sender task shut down cleanly on error
-    // instead of waiting for a reconnect that will never come.
-    drop(handle.reconnect_tx);
+    // Keep reconnect_rx open for the worker lifetime. Dropping this sender
+    // here makes the healthy loop observe a closed channel and exit; dropping
+    // the returned PipelinedSender later closes it naturally.
+    let reconnect_tx = handle.reconnect_tx;
 
     let alive = Arc::new(AtomicBool::new(true));
     let alive_for_drain = alive.clone();
@@ -298,5 +309,64 @@ pub fn spawn_pipelined(
         }
     });
 
-    PipelinedSender { rpc_tx: handle.rpc_tx, alive }
+    PipelinedSender { rpc_tx: handle.rpc_tx, _reconnect_tx: reconnect_tx, alive }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferogram_connect::FrameKind;
+    use ferogram_mtproto::EncryptedSession;
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn loopback_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback bind");
+        let address = listener.local_addr().expect("loopback address");
+        let (accepted, connected) = tokio::join!(listener.accept(), TcpStream::connect(address));
+        (accepted.expect("loopback accept").0, connected.expect("loopback connect"))
+    }
+
+    fn test_session() -> EncryptedSession {
+        EncryptedSession::new([7u8; 256], 0, 0)
+    }
+
+    #[tokio::test]
+    async fn transfer_worker_survives_healthy_idle() {
+        let (server_side, client_side) = loopback_pair().await;
+        let sender = spawn_pipelined(server_side, test_session(), FrameKind::Abridged, None);
+        // The pre-fix defect closed reconnect_rx at construction, so the
+        // biased select observed it immediately and the worker exited before
+        // any RPC could be enqueued. A healthy worker must stay alive across
+        // several yields with no traffic at all.
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(sender.is_alive(), "healthy transfer worker exited while idle");
+        assert!(
+            sender.enqueue(vec![0x01, 0x02, 0x03, 0x04]).await.is_ok(),
+            "healthy transfer worker refused an RPC enqueue"
+        );
+        drop(client_side);
+        drop(sender);
+    }
+
+    #[tokio::test]
+    async fn transfer_worker_reports_death_and_releases_channel() {
+        let (server_side, client_side) = loopback_pair().await;
+        let sender = spawn_pipelined(server_side, test_session(), FrameKind::Abridged, None);
+        // Dropping the TCP peer forces the sender task through its error
+        // branch; the drain task must flip the liveness flag, and dropping
+        // the last handle must close the retained reconnect channel so the
+        // worker can shut down instead of waiting forever.
+        drop(client_side);
+        tokio::time::timeout(std::time::Duration::from_secs(95), async {
+            while sender.is_alive() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dead transfer worker never reported its death");
+        drop(sender);
+        tokio::task::yield_now().await;
+    }
 }

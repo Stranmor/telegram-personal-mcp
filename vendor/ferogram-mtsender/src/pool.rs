@@ -40,6 +40,10 @@ const MAX_CONNS_PER_DC: usize = 3;
 /// to touch the connection itself.
 pub struct ConnSlot {
     rpc_tx: mpsc::Sender<RpcEnqueue>,
+    /// Keep the sender side alive for the lifetime of the slot. The worker
+    /// loop selects this channel even while healthy; dropping it makes the
+    /// closed receiver immediately ready and exits before the first RPC.
+    _reconnect_tx: mpsc::Sender<crate::sender_task::ReconnectRequest>,
     pub in_flight: AtomicUsize,
     /// Set to `false` by the drain task below once the connection's sender
     /// task reports an error. Callers check this after a failed call to
@@ -122,13 +126,12 @@ impl DcPool {
 
         let (handle, mut frame_rx) = spawn_sender_task(stream, enc, frame_kind, None);
 
-        // Pool slots don't support reconnect: on failure the pool just
-        // evicts the whole DC and a fresh slot is opened from scratch on the
-        // next call. Dropping reconnect_tx here means the sender task's
-        // error branch sees its reconnect channel closed and shuts itself
-        // down cleanly instead of waiting for a reconnect that will never
-        // come.
-        drop(handle.reconnect_tx);
+        // Pool slots do not reconnect in place: eviction drops this handle and
+        // closes both channels. While the slot is alive, however, retain the
+        // reconnect sender. A closed reconnect receiver is immediately ready
+        // in sender_loop's biased select and would make the worker exit before
+        // its first RPC.
+        let reconnect_tx = handle.reconnect_tx;
 
         let alive = Arc::new(AtomicBool::new(true));
         let alive_for_drain = alive.clone();
@@ -146,6 +149,7 @@ impl DcPool {
 
         Arc::new(ConnSlot {
             rpc_tx: handle.rpc_tx,
+            _reconnect_tx: reconnect_tx,
             in_flight: AtomicUsize::new(0),
             alive,
             auth_key,
