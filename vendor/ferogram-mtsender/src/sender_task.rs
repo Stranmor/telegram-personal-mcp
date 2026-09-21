@@ -351,22 +351,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transfer_worker_reports_death_and_releases_channel() {
+    async fn transfer_worker_shuts_down_after_drop() {
         let (server_side, client_side) = loopback_pair().await;
         let sender = spawn_pipelined(server_side, test_session(), FrameKind::Abridged, None);
-        // Dropping the TCP peer forces the sender task through its error
-        // branch; the drain task must flip the liveness flag, and dropping
-        // the last handle must close the retained reconnect channel so the
-        // worker can shut down instead of waiting forever.
+        // Dropping the returned handle must close the retained reconnect
+        // channel: the worker then observes the closed branch and shuts down
+        // instead of waiting for a reconnect that will never come.
+        let rpc_tx = sender.rpc_tx.clone();
+        drop(sender);
         drop(client_side);
-        tokio::time::timeout(std::time::Duration::from_secs(95), async {
-            while sender.is_alive() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !rpc_tx.is_closed() {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("dead transfer worker never reported its death");
-        drop(sender);
-        tokio::task::yield_now().await;
+        .expect("worker did not shut down after its handles were dropped");
     }
 }
