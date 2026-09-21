@@ -209,21 +209,22 @@ impl SendLedger {
         if changed > 0 {
             return Ok(());
         }
-        let existing_message_id = connection
+        let existing = connection
             .query_row(
-                "SELECT message_id FROM prepared_sends WHERE draft_id = ?1",
+                "SELECT state, message_id FROM prepared_sends WHERE draft_id = ?1",
                 [draft_id],
-                |row| row.get::<_, Option<i32>>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i32>>(1)?)),
             )
             .optional()?;
-        match existing_message_id {
+        match existing {
             None => Err(rusqlite::Error::QueryReturnedNoRows),
-            Some(Some(existing)) => Err(state_error(format!(
-                "prepared send {draft_id} is already bound to Telegram message {existing}, not {message_id}"
+            Some((state, Some(existing))) if existing == message_id => Ok(()),
+            Some((state, Some(existing))) => Err(state_error(format!(
+                "prepared send {draft_id} cannot transition {state} → sent with Telegram message {message_id}: already bound to message {existing}"
             ))),
-            Some(None) => {
-                Err(state_error(format!("prepared send {draft_id} could not transition to sent")))
-            },
+            Some((state, None)) => Err(state_error(format!(
+                "prepared send {draft_id} cannot transition {state} → sent with Telegram message {message_id}: no receipt recorded"
+            ))),
         }
     }
 
@@ -307,6 +308,36 @@ impl SendLedger {
         get_approval_from_connection(&connection, approval_id)
     }
 
+    /// A granted send needs no card at all: move it straight from
+    /// `dispatching_card` to `pending`, the state the send path accepts, and
+    /// leave no bot message behind. Mirrors the mutation ledger so the
+    /// owner-grant path reaches `sent` through the honest
+    /// `dispatching_card → pending → sending → sent` chain.
+    pub fn mark_approval_card_skipped(&self, approval_id: &str) -> rusqlite::Result<()> {
+        let connection = self.connection()?;
+        let changed = connection.execute(
+            "UPDATE send_approvals
+             SET state = 'pending', last_error_code = NULL
+             WHERE approval_id = ?1 AND state = 'dispatching_card'",
+            params![approval_id],
+        )?;
+        if changed > 0 {
+            return Ok(());
+        }
+        let existing =
+            self.get_approval(approval_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        match existing.state {
+            SendApprovalState::Pending
+            | SendApprovalState::Sending
+            | SendApprovalState::DeliveryUncertain
+            | SendApprovalState::Sent => Ok(()),
+            other => Err(state_error(format!(
+                "approval {approval_id} cannot skip its card from state {}: only dispatching_card → pending is allowed",
+                send_approval_state_name(other)
+            ))),
+        }
+    }
+
     pub fn mark_approval_card_delivered(
         &self,
         approval_id: &str,
@@ -330,7 +361,8 @@ impl SendLedger {
             Ok(())
         } else {
             Err(state_error(format!(
-                "approval {approval_id} could not bind bot message {message_id}"
+                "approval {approval_id} cannot transition {} → pending with bot message {message_id}: card already bound differently",
+                send_approval_state_name(existing.state)
             )))
         }
     }
@@ -450,11 +482,13 @@ impl SendLedger {
         match existing.target_message_id {
             Some(existing_message_id) if existing_message_id == target_message_id => Ok(()),
             Some(existing_message_id) => Err(state_error(format!(
-                "approval {approval_id} is already bound to Telegram message {existing_message_id}, not {target_message_id}"
+                "approval {approval_id} cannot transition {} → sent with Telegram message {target_message_id}: already bound to message {existing_message_id}",
+                send_approval_state_name(existing.state)
             ))),
-            None => {
-                Err(state_error(format!("approval {approval_id} could not transition to sent")))
-            },
+            None => Err(state_error(format!(
+                "approval {approval_id} cannot transition {} → sent with Telegram message {target_message_id}: only sending → sent and delivery_uncertain → sent are allowed",
+                send_approval_state_name(existing.state)
+            ))),
         }
     }
 
@@ -494,7 +528,13 @@ impl SendLedger {
         if changed > 0 {
             Ok(())
         } else {
-            Err(state_error(format!("approval {approval_id} cannot schedule a send retry")))
+            let current = self
+                .get_approval(approval_id)?
+                .map(|approval| send_approval_state_name(approval.state).to_string())
+                .unwrap_or_else(|| "missing".to_string());
+            Err(state_error(format!(
+                "approval {approval_id} cannot schedule a send retry from state {current}: only sending and delivery_uncertain can retry"
+            )))
         }
     }
 
@@ -949,11 +989,34 @@ fn sqlite_sidecars(path: &Path) -> [PathBuf; 2] {
 }
 
 fn state_error(message: String) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(
-        0,
-        rusqlite::types::Type::Text,
-        std::io::Error::new(std::io::ErrorKind::InvalidData, message).into(),
-    )
+    // Business-logic transition refusals must never look like type
+    // conversions: `SqliteFailure(_, Some(_))` renders the message verbatim,
+    // while `FromSqlConversionFailure` would prefix it with
+    // "Conversion error from type Text at index: 0,".
+    rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(1), Some(message))
+}
+
+fn send_approval_state_name(state: SendApprovalState) -> &'static str {
+    match state {
+        SendApprovalState::DispatchingCard => "dispatching_card",
+        SendApprovalState::Pending => "pending",
+        SendApprovalState::CardDeliveryUncertain => "card_delivery_uncertain",
+        SendApprovalState::Sending => "sending",
+        SendApprovalState::DeliveryUncertain => "delivery_uncertain",
+        SendApprovalState::Sent => "sent",
+        SendApprovalState::Cancelled => "cancelled",
+        SendApprovalState::Expired => "expired",
+        SendApprovalState::Failed => "failed",
+    }
+}
+
+fn prepared_send_state_name(state: PreparedSendState) -> &'static str {
+    match state {
+        PreparedSendState::Prepared => "prepared",
+        PreparedSendState::Dispatching => "dispatching",
+        PreparedSendState::Sent => "sent",
+        PreparedSendState::DeliveryUncertain => "delivery_uncertain",
+    }
 }
 
 fn parse_prepared_source(value: Option<&str>) -> rusqlite::Result<Option<PreparedOutboundSource>> {

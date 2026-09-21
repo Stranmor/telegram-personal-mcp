@@ -13464,13 +13464,6 @@ impl McpServer {
                 false,
             ))));
         }
-        if prepared.public.state == PreparedSendState::Sent {
-            return Err(Json(ToolOutcome::failure(ToolFailure::new(
-                "DRAFT_ALREADY_SENT",
-                "the prepared message has already been sent",
-                false,
-            ))));
-        }
         let request = self
             .send_ledger
             .create_or_get_approval(
@@ -13481,6 +13474,17 @@ impl McpServer {
                 runtime.policy.ttl_seconds,
             )
             .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
+        // Idempotent repeat: a sent or in-flight approval never triggers a
+        // second Telegram send. The same receipt is returned without consuming
+        // another owner-grant message or dispatching another card.
+        if matches!(
+            request.public.state,
+            SendApprovalState::Sent
+                | SendApprovalState::Sending
+                | SendApprovalState::DeliveryUncertain
+        ) {
+            return Ok(Json(ToolOutcome::success(request.public)));
+        }
         // Owner grant: the owner authorized this host in an interactive chat
         // ("да, отправляй"). The card is skipped only for the exact peers and
         // the message budget he granted, the permission expires on its own and
@@ -13501,9 +13505,52 @@ impl McpServer {
                     "owner grant covered this send; approval card skipped"
                 );
                 self.send_ledger
+                    .mark_approval_card_skipped(&request.public.approval_id)
+                    .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
+                let claimed = self
+                    .send_ledger
                     .mark_approval_sending(&request.public.approval_id, now_unix())
                     .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
-                self.complete_approval_send(runtime, request.public.clone())
+                if !claimed {
+                    // Never silently drop a `false`: the approval left the
+                    // pending window (expired, cancelled, or already claimed).
+                    // A sent/in-flight receipt is returned without a second
+                    // send; anything else is an honest, non-retryable refusal.
+                    let current = self
+                        .send_ledger
+                        .get_approval(&request.public.approval_id)
+                        .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?
+                        .ok_or_else(|| {
+                            Json(ToolOutcome::failure(ToolFailure::new(
+                                "APPROVAL_NOT_FOUND",
+                                "approval disappeared after its card was skipped",
+                                false,
+                            )))
+                        })?;
+                    if matches!(
+                        current.state,
+                        SendApprovalState::Sent
+                            | SendApprovalState::Sending
+                            | SendApprovalState::DeliveryUncertain
+                    ) {
+                        return Ok(Json(ToolOutcome::success(current)));
+                    }
+                    return Err(Json(ToolOutcome::failure(ToolFailure::new(
+                        "APPROVAL_NOT_SENDABLE",
+                        format!(
+                            "owner grant cannot send approval {} from state {:?}: only a pending approval can enter sending",
+                            current.approval_id, current.state
+                        ),
+                        false,
+                    ))));
+                }
+                // The snapshot captured before the transition still says
+                // dispatching_card; the send path requires the reloaded sending
+                // state, the same way a granted mutation reloads applying.
+                let sending = self
+                    .reload_approval(&request.public.approval_id)
+                    .map_err(|error| Json(ToolOutcome::failure(error)))?;
+                self.complete_approval_send(runtime, sending)
                     .await
                     .map_err(|error| Json(ToolOutcome::failure(error)))?;
                 let final_state = self
@@ -31446,9 +31493,53 @@ impl McpServer {
                         true,
                     )
                 })?;
-                self.send_ledger
-                    .mark_approval_sent(&approval.approval_id, message_id)
-                    .map_err(ledger_failure)?;
+                if let Err(record_error) =
+                    self.send_ledger.mark_approval_sent(&approval.approval_id, message_id)
+                {
+                    // The Telegram send already happened (`prepared_sends = sent`
+                    // with this message id). Reconcile before reporting: a
+                    // concurrent worker may have recorded the receipt, or a
+                    // transient write may succeed on retry. Only when the
+                    // receipt is still unrecorded do we return the
+                    // non-retryable confirmation — a silent retryable here
+                    // would make the caller send a duplicate.
+                    if let Ok(Some(current)) =
+                        self.send_ledger.get_approval(&approval.approval_id)
+                    {
+                        if current.state == SendApprovalState::Sent
+                            && current.target_message_id == Some(message_id)
+                        {
+                            self.edit_approval_card(runtime, &current).await;
+                            return Ok(());
+                        }
+                    }
+                    let delivery_confirmed = self
+                        .send_ledger
+                        .get(&approval.draft_id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|record| {
+                            record.public.state == PreparedSendState::Sent
+                                && record.public.message_id == Some(message_id)
+                        });
+                    if delivery_confirmed
+                        && self
+                            .send_ledger
+                            .mark_approval_sent(&approval.approval_id, message_id)
+                            .is_ok()
+                    {
+                        let reconciled = self.reload_approval(&approval.approval_id)?;
+                        self.edit_approval_card(runtime, &reconciled).await;
+                        return Ok(());
+                    }
+                    if delivery_confirmed {
+                        return Err(ToolFailure::delivery_state_unrecorded(format!(
+                            "Telegram message {message_id} for approval {} (draft {}) was sent, but the approval receipt could not be recorded: {record_error}; do not resend — reconcile via get_send_approval",
+                            approval.approval_id, approval.draft_id
+                        )));
+                    }
+                    return Err(ledger_failure(record_error));
+                }
             },
             Err(error) if error.code == "DELIVERY_UNCERTAIN" => {
                 let current = self.reload_approval(&approval.approval_id)?;
