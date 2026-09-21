@@ -218,7 +218,7 @@ impl SendLedger {
             .optional()?;
         match existing {
             None => Err(rusqlite::Error::QueryReturnedNoRows),
-            Some((state, Some(existing))) if existing == message_id => Ok(()),
+            Some((_, Some(existing))) if existing == message_id => Ok(()),
             Some((state, Some(existing))) => Err(state_error(format!(
                 "prepared send {draft_id} cannot transition {state} → sent with Telegram message {message_id}: already bound to message {existing}"
             ))),
@@ -1007,15 +1007,6 @@ fn send_approval_state_name(state: SendApprovalState) -> &'static str {
         SendApprovalState::Cancelled => "cancelled",
         SendApprovalState::Expired => "expired",
         SendApprovalState::Failed => "failed",
-    }
-}
-
-fn prepared_send_state_name(state: PreparedSendState) -> &'static str {
-    match state {
-        PreparedSendState::Prepared => "prepared",
-        PreparedSendState::Dispatching => "dispatching",
-        PreparedSendState::Sent => "sent",
-        PreparedSendState::DeliveryUncertain => "delivery_uncertain",
     }
 }
 
