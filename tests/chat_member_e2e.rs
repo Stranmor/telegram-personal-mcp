@@ -159,6 +159,7 @@ async fn chat_member_lifecycle_is_e2e_and_idempotent() -> anyhow::Result<()> {
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )

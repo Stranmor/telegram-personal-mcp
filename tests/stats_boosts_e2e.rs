@@ -243,6 +243,7 @@ async fn boost_slots_are_approval_bound_read_back_and_recovered_without_duplicat
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )

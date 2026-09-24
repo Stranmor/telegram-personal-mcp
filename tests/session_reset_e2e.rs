@@ -133,6 +133,7 @@ async fn all_other_sessions_reset_is_exact_current_safe_and_idempotently_recover
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )

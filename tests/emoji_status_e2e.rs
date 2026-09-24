@@ -151,6 +151,7 @@ async fn emoji_status_catalogues_and_mutations_are_exact_hash_bound_and_recovera
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )

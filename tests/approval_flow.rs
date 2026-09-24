@@ -39,6 +39,7 @@ async fn telegram_button_is_the_only_send_path_and_cannot_duplicate_delivery() -
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )
@@ -230,6 +231,7 @@ async fn scheduled_approval_expiry_is_capped_to_the_delivery_time() -> anyhow::R
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot,
     )
@@ -316,6 +318,7 @@ async fn current_session_scheduled_rich_text_is_structured_for_send_and_edit() -
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot,
     )
@@ -478,6 +481,7 @@ async fn rich_markdown_keeps_its_kind_through_button_approval_and_dispatch() -> 
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )
@@ -583,6 +587,7 @@ async fn operator_bot_rich_message_is_fixed_to_the_configured_private_chat() -> 
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )
@@ -666,6 +671,7 @@ async fn a_callback_can_bind_a_card_whose_bot_api_receipt_was_lost() -> anyhow::
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )
@@ -779,6 +785,7 @@ async fn mutation_buttons_apply_once_and_cancel_without_side_effects() -> anyhow
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )
@@ -2123,6 +2130,7 @@ async fn changed_message_snapshot_blocks_an_approved_edit() -> anyhow::Result<()
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )

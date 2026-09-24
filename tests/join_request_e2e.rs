@@ -124,6 +124,7 @@ async fn join_request_lifecycle_is_snapshot_bound_and_e2e() -> anyhow::Result<()
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )

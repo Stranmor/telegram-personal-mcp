@@ -61,6 +61,7 @@ async fn gif_send_is_magic_validated_hash_bound_approved_and_exactly_once() -> a
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )

@@ -134,6 +134,7 @@ async fn chat_photo_lifecycle_is_e2e_hash_bound_and_exactly_once() -> anyhow::Re
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )

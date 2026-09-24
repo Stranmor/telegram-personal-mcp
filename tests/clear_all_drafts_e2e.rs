@@ -179,6 +179,7 @@ async fn clear_all_drafts_binds_complete_state_and_never_erases_a_later_draft() 
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )

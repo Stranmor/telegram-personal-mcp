@@ -148,6 +148,7 @@ async fn approval_worker_recovers_after_target_acceptance_and_process_restart() 
         approval_user_id: 700,
         ttl_seconds: 3_600,
         poll_timeout_seconds: 1,
+        owner_grant_file: None,
     };
 
     let first_server =
@@ -269,6 +270,7 @@ async fn file_approval_recovers_after_acceptance_without_duplicate_upload_messag
         approval_user_id: 700,
         ttl_seconds: 3_600,
         poll_timeout_seconds: 1,
+        owner_grant_file: None,
     };
 
     let first_server =

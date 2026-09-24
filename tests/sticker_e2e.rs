@@ -270,6 +270,7 @@ async fn sticker_send_is_approved_read_back_and_recovered_without_duplicate_prov
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )
@@ -409,6 +410,7 @@ async fn sticker_favourites_and_installation_are_approved_read_back_and_recovera
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )

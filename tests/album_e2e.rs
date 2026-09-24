@@ -71,6 +71,7 @@ async fn mixed_album_is_grouped_topic_bound_and_recovered_without_duplicates() -
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )

@@ -324,6 +324,7 @@ async fn story_views_require_one_exact_idempotent_operator_approval() -> anyhow:
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )
@@ -441,6 +442,7 @@ async fn story_publish_and_delete_are_hash_bound_exactly_once_and_read_back() ->
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )
@@ -748,6 +750,7 @@ async fn story_state_mutations_are_approved_read_back_and_toggle_safe() -> anyho
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )
@@ -942,6 +945,7 @@ async fn story_reporting_preserves_the_provider_flow_and_is_exactly_once() -> an
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )
@@ -1070,6 +1074,7 @@ async fn uncertain_story_report_recovery_never_replays_the_provider_call() -> an
             approval_user_id: 700,
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
+            owner_grant_file: None,
         },
         bot.clone(),
     )
