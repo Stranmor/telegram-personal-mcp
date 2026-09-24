@@ -43,8 +43,8 @@ pub(crate) fn non_negative_integer_array_schema(
 }
 
 pub use approval::{
-    ApprovalAction, ApprovalBot, ApprovalPolicy, BotApiApprovalBot, FakeApprovalBot,
-    FanoutApprovalBot, OperatorRichMessageReceipt,
+    ApprovalAction, ApprovalBot, ApprovalPolicy, BotApiApprovalBot, CardMedia, CardMediaKind,
+    FakeApprovalBot, FanoutApprovalBot, OperatorRichMessageReceipt,
 };
 pub use backend::TelegramBackend;
 pub use config::Config;

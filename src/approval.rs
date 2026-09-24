@@ -43,6 +43,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 const MAX_APPROVAL_CARD_UTF16: usize = 3_800;
+const MAX_MEDIA_CAPTION_UTF16: usize = 1_024;
 const MAX_CALLBACK_QUERY_ID_BYTES: usize = 256;
 const MAX_CALLBACK_DATA_BYTES: usize = 64;
 const APPROVE_PREFIX: &str = "tpa:a:";
@@ -243,16 +244,70 @@ pub struct ApprovalCard {
     pub approval: SendApproval,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardMediaKind {
+    Photo,
+    Video,
+    Animation,
+    Voice,
+    Document,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardMedia {
+    pub path: PathBuf,
+    pub mime: String,
+    pub kind: CardMediaKind,
+}
+
+impl CardMedia {
+    pub fn from_path(path: PathBuf, file_name: &str) -> Self {
+        let extension = Path::new(file_name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .or_else(|| path.extension().and_then(|value| value.to_str()))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let (mime, kind) = match extension.as_str() {
+            "jpg" | "jpeg" => ("image/jpeg", CardMediaKind::Photo),
+            "png" => ("image/png", CardMediaKind::Photo),
+            "webp" => ("image/webp", CardMediaKind::Photo),
+            "mp4" => ("video/mp4", CardMediaKind::Video),
+            "webm" => ("video/webm", CardMediaKind::Video),
+            "mov" => ("video/quicktime", CardMediaKind::Video),
+            "m4v" => ("video/x-m4v", CardMediaKind::Video),
+            "gif" => ("image/gif", CardMediaKind::Animation),
+            "ogg" | "oga" => ("audio/ogg", CardMediaKind::Voice),
+            "opus" => ("audio/opus", CardMediaKind::Voice),
+            _ => ("application/octet-stream", CardMediaKind::Document),
+        };
+        Self { path, mime: mime.to_string(), kind }
+    }
+
+    fn api_method_and_field(&self) -> (&'static str, &'static str) {
+        match self.kind {
+            CardMediaKind::Photo => ("sendPhoto", "photo"),
+            CardMediaKind::Video => ("sendVideo", "video"),
+            CardMediaKind::Animation => ("sendAnimation", "animation"),
+            CardMediaKind::Voice => ("sendVoice", "voice"),
+            CardMediaKind::Document => ("sendDocument", "document"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MutationApprovalCard {
     pub approval: MutationApproval,
     pub invite_progress: Option<InviteBatchProgress>,
+    pub media: Option<CardMedia>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ApprovalCardReceipt {
     pub message_id: i64,
 }
+
+pub type SentCard = ApprovalCardReceipt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorRichMessageReceipt {
@@ -269,15 +324,15 @@ pub struct OperatorRichMessageReceipt {
 pub struct ApprovalBotError {
     pub code: &'static str,
     pub delivery_uncertain: bool,
+    pub message: Option<String>,
 }
-
 impl ApprovalBotError {
     fn known(code: &'static str) -> Self {
-        Self { code, delivery_uncertain: false }
+        Self { code, delivery_uncertain: false, message: None }
     }
 
     fn uncertain(code: &'static str) -> Self {
-        Self { code, delivery_uncertain: true }
+        Self { code, delivery_uncertain: true, message: None }
     }
 }
 
@@ -289,9 +344,16 @@ pub trait ApprovalBot: Send + Sync + 'static {
         html: &str,
     ) -> Result<OperatorRichMessageReceipt, ApprovalBotError>;
 
+    async fn send_operator_media_card(
+        &self,
+        chat_id: i64,
+        media: &CardMedia,
+        caption_html: &str,
+        keyboard: Option<&InlineKeyboardMarkup>,
+    ) -> Result<SentCard, ApprovalBotError>;
+
     async fn send_card(&self, card: &ApprovalCard)
     -> Result<ApprovalCardReceipt, ApprovalBotError>;
-
     async fn edit_card(&self, card: &ApprovalCard, message_id: i64)
     -> Result<(), ApprovalBotError>;
 
@@ -401,7 +463,59 @@ impl BotApiApprovalBot {
             .await
             .map_err(|_| ApprovalBotError::uncertain("BOT_API_RESPONSE_INVALID"))?;
         if !status.is_success() || !envelope.ok {
-            return Err(ApprovalBotError::known(status_error_code(status)));
+            let mut error = ApprovalBotError::known(status_error_code(status));
+            error.message = envelope.description;
+            return Err(error);
+        }
+        envelope.result.ok_or_else(|| ApprovalBotError::uncertain("BOT_API_RESULT_MISSING"))
+    }
+
+    async fn post_media(
+        &self,
+        chat_id: i64,
+        media: &CardMedia,
+        caption_html: &str,
+        keyboard: Option<&InlineKeyboardMarkup>,
+    ) -> Result<BotMessageResult, ApprovalBotError> {
+        let bytes = tokio::fs::read(&media.path)
+            .await
+            .map_err(|_| ApprovalBotError::known("BOT_MEDIA_READ_FAILED"))?;
+        let file_name = media
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("attachment");
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(file_name.to_string())
+            .mime_str(&media.mime)
+            .map_err(|_| ApprovalBotError::known("BOT_MEDIA_MIME_INVALID"))?;
+        let mut form = reqwest::multipart::Form::new()
+            .text("chat_id", chat_id.to_string())
+            .text("caption", caption_html.to_string())
+            .text("parse_mode", "HTML")
+            .part(media.api_method_and_field().1, part);
+        if let Some(keyboard) = keyboard {
+            let markup = serde_json::to_string(keyboard)
+                .map_err(|_| ApprovalBotError::known("BOT_REPLY_MARKUP_INVALID"))?;
+            form = form.text("reply_markup", markup);
+        }
+        let response = self
+            .client
+            .post(self.endpoint(media.api_method_and_field().0))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|_| ApprovalBotError::uncertain("BOT_API_TRANSPORT_UNCERTAIN"))?;
+        let status = response.status();
+        let envelope = response
+            .json::<BotApiEnvelope<BotMessageResult>>()
+            .await
+            .map_err(|_| ApprovalBotError::uncertain("BOT_API_RESPONSE_INVALID"))?;
+        if !status.is_success() || !envelope.ok {
+            let mut error = ApprovalBotError::known(status_error_code(status));
+            error.message = envelope.description;
+            return Err(error);
         }
         envelope.result.ok_or_else(|| ApprovalBotError::uncertain("BOT_API_RESULT_MISSING"))
     }
@@ -624,6 +738,16 @@ impl ApprovalBot for FanoutApprovalBot {
         self.outbound.send_operator_rich_message(chat_id, html).await
     }
 
+    async fn send_operator_media_card(
+        &self,
+        chat_id: i64,
+        media: &CardMedia,
+        caption_html: &str,
+        keyboard: Option<&InlineKeyboardMarkup>,
+    ) -> Result<SentCard, ApprovalBotError> {
+        self.outbound.send_operator_media_card(chat_id, media, caption_html, keyboard).await
+    }
+
     async fn send_card(
         &self,
         card: &ApprovalCard,
@@ -718,6 +842,23 @@ impl ApprovalBot for BotApiApprovalBot {
         })
     }
 
+    async fn send_operator_media_card(
+        &self,
+        chat_id: i64,
+        media: &CardMedia,
+        caption_html: &str,
+        keyboard: Option<&InlineKeyboardMarkup>,
+    ) -> Result<SentCard, ApprovalBotError> {
+        if chat_id == 0 || caption_html.encode_utf16().count() > 1_024 {
+            return Err(ApprovalBotError::known("BOT_MEDIA_CARD_INVALID"));
+        }
+        let response = self.post_media(chat_id, media, caption_html, keyboard).await?;
+        if response.message_id <= 0 {
+            return Err(ApprovalBotError::uncertain("BOT_MESSAGE_ID_INVALID"));
+        }
+        Ok(SentCard { message_id: response.message_id })
+    }
+
     async fn send_card(
         &self,
         card: &ApprovalCard,
@@ -732,6 +873,7 @@ impl ApprovalBot for BotApiApprovalBot {
                     parse_mode: Some("HTML"),
                     link_preview_options: LinkPreviewOptions { is_disabled: true },
                     reply_markup: keyboard_for(&card.approval),
+                    reply_parameters: None,
                 },
             )
             .await?;
@@ -770,6 +912,45 @@ impl ApprovalBot for BotApiApprovalBot {
         card: &MutationApprovalCard,
     ) -> Result<ApprovalCardReceipt, ApprovalBotError> {
         let text = render_mutation_card(card)?;
+        if let Some(media) = card.media.as_ref() {
+            let keyboard = keyboard_for_mutation(&card.approval);
+            if mutation_card_is_media_preview(&text) {
+                let response = self
+                    .post_media(card.approval.approval_chat_id, media, &text, Some(&keyboard))
+                    .await?;
+                if response.message_id <= 0 {
+                    return Err(ApprovalBotError::uncertain("BOT_MESSAGE_ID_INVALID"));
+                }
+                return Ok(ApprovalCardReceipt { message_id: response.message_id });
+            }
+            let preview_caption =
+                format!("Предпросмотр: {}", escape_html(&card_preview_file_name(card)));
+            let preview = self
+                .post_media(card.approval.approval_chat_id, media, &preview_caption, None)
+                .await?;
+            if preview.message_id <= 0 {
+                return Err(ApprovalBotError::uncertain("BOT_MESSAGE_ID_INVALID"));
+            }
+            let response: BotMessageResult = self
+                .post(
+                    "sendMessage",
+                    &SendMessageRequest {
+                        chat_id: card.approval.approval_chat_id,
+                        text,
+                        parse_mode: mutation_card_parse_mode(&card.approval.action),
+                        link_preview_options: LinkPreviewOptions { is_disabled: true },
+                        reply_markup: keyboard,
+                        reply_parameters: Some(ReplyParameters {
+                            message_id: preview.message_id,
+                        }),
+                    },
+                )
+                .await?;
+            if response.message_id <= 0 {
+                return Err(ApprovalBotError::uncertain("BOT_MESSAGE_ID_INVALID"));
+            }
+            return Ok(ApprovalCardReceipt { message_id: response.message_id });
+        }
         let response: BotMessageResult = self
             .post(
                 "sendMessage",
@@ -779,6 +960,7 @@ impl ApprovalBot for BotApiApprovalBot {
                     parse_mode: mutation_card_parse_mode(&card.approval.action),
                     link_preview_options: LinkPreviewOptions { is_disabled: true },
                     reply_markup: keyboard_for_mutation(&card.approval),
+                    reply_parameters: None,
                 },
             )
             .await?;
@@ -797,19 +979,32 @@ impl ApprovalBot for BotApiApprovalBot {
             return Err(ApprovalBotError::known("BOT_MESSAGE_ID_INVALID"));
         }
         let text = render_mutation_card(card)?;
-        let _: serde_json::Value = self
-            .post(
-                "editMessageText",
-                &EditMessageRequest {
-                    chat_id: card.approval.approval_chat_id,
-                    message_id,
-                    text,
-                    parse_mode: mutation_card_parse_mode(&card.approval.action),
-                    reply_markup: keyboard_for_mutation(&card.approval),
-                },
-            )
-            .await?;
-        Ok(())
+        let edit = EditMessageRequest {
+            chat_id: card.approval.approval_chat_id,
+            message_id,
+            text: text.clone(),
+            parse_mode: mutation_card_parse_mode(&card.approval.action),
+            reply_markup: keyboard_for_mutation(&card.approval),
+        };
+        match self.post::<EditMessageRequest, serde_json::Value>("editMessageText", &edit).await {
+            Ok(_) => Ok(()),
+            Err(error) if is_no_text_edit_error(&error) => {
+                let _: serde_json::Value = self
+                    .post(
+                        "editMessageCaption",
+                        &EditMessageCaptionRequest {
+                            chat_id: card.approval.approval_chat_id,
+                            message_id,
+                            caption: text,
+                            parse_mode: mutation_card_parse_mode(&card.approval.action),
+                            reply_markup: keyboard_for_mutation(&card.approval),
+                        },
+                    )
+                    .await?;
+                Ok(())
+            },
+            Err(error) => Err(error),
+        }
     }
 
     async fn poll_updates(
@@ -1708,8 +1903,248 @@ fn business_intro_spec_label(intro: Option<&BusinessIntroSpec>) -> String {
 }
 
 fn mutation_card_parse_mode(action: &MutationAction) -> Option<&'static str> {
-    matches!(action, MutationAction::ScheduleMessage { .. } | MutationAction::ScheduleFile { .. })
-        .then_some("HTML")
+    matches!(
+        action,
+        MutationAction::ScheduleMessage { .. }
+            | MutationAction::ScheduleFile { .. }
+            | MutationAction::SendFile { .. }
+            | MutationAction::SendStory { .. }
+    )
+    .then_some("HTML")
+}
+
+fn human_file_size(size_bytes: u64) -> String {
+    const KIB: f64 = 1_024.0;
+    const MIB: f64 = 1_024.0 * 1_024.0;
+    const GIB: f64 = 1_024.0 * 1_024.0 * 1_024.0;
+    let size = size_bytes as f64;
+    if size < KIB {
+        format!("{size_bytes} Б")
+    } else if size < MIB {
+        format!("{:.1} КБ", size / KIB)
+    } else if size < GIB {
+        format!("{:.1} МБ", size / MIB)
+    } else {
+        format!("{:.1} ГБ", size / GIB)
+    }
+}
+
+fn short_sha256(sha256: &str) -> String {
+    sha256.chars().take(12).collect()
+}
+
+fn send_file_kind_label(mode: crate::domain::FileSendMode) -> &'static str {
+    match mode {
+        crate::domain::FileSendMode::Photo => "фото",
+        crate::domain::FileSendMode::Document => "документ",
+        crate::domain::FileSendMode::Gif => "гифка",
+        crate::domain::FileSendMode::Auto => "файл",
+    }
+}
+
+fn story_visibility_label(privacy: &crate::domain::StoryPrivacySpec) -> String {
+    match privacy.kind.as_str() {
+        "everyone" => "всем".to_string(),
+        "contacts" => "контактам".to_string(),
+        "close_friends" => "близким друзьям".to_string(),
+        "selected_contacts" => {
+            if privacy.selected_user_ids.is_empty() {
+                "выбранным контактам".to_string()
+            } else {
+                format!("выбранным контактам ({})", privacy.selected_user_ids.len())
+            }
+        },
+        other => {
+            if other.trim().is_empty() {
+                "всем".to_string()
+            } else {
+                other.to_string()
+            }
+        },
+    }
+}
+
+fn story_lifetime_label(period_seconds: Option<i32>) -> String {
+    match period_seconds {
+        None | Some(86_400) => "24 часа".to_string(),
+        Some(seconds) if seconds % 3_600 == 0 => {
+            let hours = seconds / 3_600;
+            format!("{hours} ч")
+        },
+        Some(seconds) => format!("{seconds} сек"),
+    }
+}
+
+fn card_preview_file_name(card: &MutationApprovalCard) -> String {
+    match &card.approval.action {
+        MutationAction::SendFile { artifact, .. } | MutationAction::SendStory { artifact, .. } => {
+            artifact.file_name.clone()
+        },
+        _ => card
+            .media
+            .as_ref()
+            .and_then(|media| {
+                media.path.file_name().and_then(|value| value.to_str()).map(str::to_string)
+            })
+            .unwrap_or_else(|| "вложение".to_string()),
+    }
+}
+
+fn mutation_card_is_media_preview(text: &str) -> bool {
+    text.encode_utf16().count() <= MAX_MEDIA_CAPTION_UTF16
+}
+
+fn is_no_text_edit_error(error: &ApprovalBotError) -> bool {
+    error
+        .message
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .contains("no text")
+}
+
+fn render_send_file_card(
+    approval: &MutationApproval,
+    chat_id: &str,
+    artifact: &crate::domain::MutationFileArtifact,
+    caption: &str,
+    mode: crate::domain::FileSendMode,
+    reply_to_message_id: Option<i32>,
+) -> Result<String, ApprovalBotError> {
+    let (title, note) = if approval.external_owner_ready {
+        (
+            "✅ <b>Подтверждено для Hermes</b>",
+            "Оператор подтвердил действие. Hermes получил одноразовое право выполнить внешний provider-вызов.",
+        )
+    } else {
+        match approval.state {
+            MutationApprovalState::DispatchingCard | MutationApprovalState::Pending => (
+                "📤 <b>Отправка в Telegram</b>",
+                "После нажатия «Опубликовать» файл уйдёт сразу.",
+            ),
+            MutationApprovalState::CardDeliveryUncertain => (
+                "⚠️ <b>Карточка могла не доставиться</b>",
+                "Не создавайте повтор: система сначала сверит состояние.",
+            ),
+            MutationApprovalState::Applying => (
+                "⏳ <b>Отправляю файл…</b>",
+                "Решение принято. Ожидаю подтверждение Telegram.",
+            ),
+            MutationApprovalState::OutcomeUnknown => (
+                "⚠️ <b>Результат отправки уточняется</b>",
+                "Telegram не подтвердил результат. Автоматический повтор возможен только после безопасной сверки.",
+            ),
+            MutationApprovalState::Applied => (
+                "✅ <b>Файл отправлен</b>",
+                "Telegram подтвердил отправку.",
+            ),
+            MutationApprovalState::Cancelled => {
+                ("Отправка отменена", "Файл адресату не отправлялся.")
+            },
+            MutationApprovalState::Expired => {
+                ("Подтверждение истекло", "Файл адресату не отправлялся.")
+            },
+            MutationApprovalState::Failed => (
+                "⚠️ <b>Не удалось отправить файл</b>",
+                "Файл не считается отправленным.",
+            ),
+        }
+    };
+    let caption_len = caption.chars().count();
+    let caption_detail = if caption.is_empty() { "[без подписи]" } else { caption };
+    let reply_detail = reply_to_message_id
+        .map(|message_id| format!("\n↩️ Ответ на сообщение {message_id}"))
+        .unwrap_or_default();
+    let receipt_detail = match &approval.result {
+        Some(crate::domain::MutationResult::FileSent { message_id, .. }) => {
+            format!(" · сообщение {message_id}")
+        },
+        _ => String::new(),
+    };
+    let rendered = format!(
+        "{title}\n\n<b>Куда:</b> <code>{}</code>\n<b>Что:</b> {} · <code>{}</code> · {}{reply_detail}\n<b>Подпись ({caption_len} знаков):</b>\n<blockquote>{}</blockquote>\n🔐 <code>{}…</code>\n\n{note}{receipt_detail}",
+        escape_html(chat_id),
+        send_file_kind_label(mode),
+        escape_html(&artifact.file_name),
+        human_file_size(artifact.size_bytes),
+        escape_html(caption_detail),
+        short_sha256(&artifact.sha256),
+    );
+    if rendered.encode_utf16().count() > MAX_APPROVAL_CARD_UTF16 {
+        return Err(ApprovalBotError::known("APPROVAL_CARD_TOO_LONG"));
+    }
+    Ok(rendered)
+}
+
+fn render_send_story_card(
+    approval: &MutationApproval,
+    peer_ref: &str,
+    artifact: &crate::domain::MutationFileArtifact,
+    caption: &str,
+    privacy: &crate::domain::StoryPrivacySpec,
+    period_seconds: Option<i32>,
+) -> Result<String, ApprovalBotError> {
+    let (title, note) = if approval.external_owner_ready {
+        (
+            "✅ <b>Подтверждено для Hermes</b>",
+            "Оператор подтвердил действие. Hermes получил одноразовое право выполнить внешний provider-вызов.",
+        )
+    } else {
+        match approval.state {
+            MutationApprovalState::DispatchingCard | MutationApprovalState::Pending => (
+                "📸 <b>Публикация сторис</b>",
+                "После нажатия «Опубликовать» сторис уйдёт сразу.",
+            ),
+            MutationApprovalState::CardDeliveryUncertain => (
+                "⚠️ <b>Карточка могла не доставиться</b>",
+                "Не создавайте повтор: система сначала сверит состояние.",
+            ),
+            MutationApprovalState::Applying => (
+                "⏳ <b>Публикую сторис…</b>",
+                "Решение принято. Ожидаю подтверждение Telegram.",
+            ),
+            MutationApprovalState::OutcomeUnknown => (
+                "⚠️ <b>Результат публикации уточняется</b>",
+                "Telegram не подтвердил результат. Автоматический повтор возможен только после безопасной сверки.",
+            ),
+            MutationApprovalState::Applied => (
+                "✅ <b>Сторис опубликована</b>",
+                "Telegram подтвердил публикацию.",
+            ),
+            MutationApprovalState::Cancelled => {
+                ("Публикация отменена", "Сторис не публиковалась.")
+            },
+            MutationApprovalState::Expired => {
+                ("Подтверждение истекло", "Сторис не публиковалась.")
+            },
+            MutationApprovalState::Failed => (
+                "⚠️ <b>Не удалось опубликовать сторис</b>",
+                "Сторис не считается опубликованной.",
+            ),
+        }
+    };
+    let caption_len = caption.chars().count();
+    let caption_detail = if caption.is_empty() { "[без подписи]" } else { caption };
+    let receipt_detail = match &approval.result {
+        Some(crate::domain::MutationResult::StorySent { story, .. }) => {
+            format!(" · сторис {}", story.story_id)
+        },
+        _ => String::new(),
+    };
+    let rendered = format!(
+        "{title}\n\n<b>Куда:</b> <code>{}</code>\n<b>Кадр:</b> <code>{}</code> · {}\n<b>Видно:</b> {}\n<b>Время жизни:</b> {}\n<b>Подпись ({caption_len} знаков):</b>\n<blockquote>{}</blockquote>\n🔐 <code>{}…</code>\n\n{note}{receipt_detail}",
+        escape_html(peer_ref),
+        escape_html(&artifact.file_name),
+        human_file_size(artifact.size_bytes),
+        escape_html(&story_visibility_label(privacy)),
+        escape_html(&story_lifetime_label(period_seconds)),
+        escape_html(caption_detail),
+        short_sha256(&artifact.sha256),
+    );
+    if rendered.encode_utf16().count() > MAX_APPROVAL_CARD_UTF16 {
+        return Err(ApprovalBotError::known("APPROVAL_CARD_TOO_LONG"));
+    }
+    Ok(rendered)
 }
 
 fn scheduled_delivery_label(schedule_date_unix: i32) -> String {
@@ -2085,6 +2520,42 @@ fn render_mutation_card(card: &MutationApprovalCard) -> Result<String, ApprovalB
             *silent,
             *noforwards,
             *mode,
+        );
+    }
+    if let MutationAction::SendFile {
+        chat_id,
+        artifact,
+        caption,
+        reply_to_message_id,
+        mode,
+        random_id: _,
+    } = &approval.action
+    {
+        return render_send_file_card(
+            approval,
+            chat_id,
+            artifact,
+            caption,
+            *mode,
+            *reply_to_message_id,
+        );
+    }
+    if let MutationAction::SendStory {
+        peer_ref,
+        artifact,
+        caption,
+        privacy,
+        period_seconds,
+        ..
+    } = &approval.action
+    {
+        return render_send_story_card(
+            approval,
+            peer_ref,
+            artifact,
+            caption,
+            privacy,
+            *period_seconds,
         );
     }
     let status = if approval.external_owner_ready {
@@ -5156,6 +5627,9 @@ fn keyboard_for_mutation(approval: &MutationApproval) -> InlineKeyboardMarkup {
             MutationAction::EditScheduledMessage { .. } => "✅ Сохранить",
             MutationAction::DeleteScheduledMessages { .. } => "🗑 Удалить",
             MutationAction::SendScheduledMessagesNow { .. } => "✉️ Отправить сейчас",
+            MutationAction::SendFile { .. } | MutationAction::SendStory { .. } => {
+                "✅ Опубликовать"
+            },
             _ => "✅ Применить",
         };
         vec![vec![
@@ -5228,12 +5702,19 @@ struct SendMessageRequest {
     parse_mode: Option<&'static str>,
     link_preview_options: LinkPreviewOptions,
     reply_markup: InlineKeyboardMarkup,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reply_parameters: Option<ReplyParameters>,
+}
+#[derive(Debug, Serialize)]
+struct ReplyParameters {
+    message_id: i64,
 }
 
-#[derive(Debug, Serialize)]
-struct SendRichMessageRequest<'a> {
-    chat_id: i64,
-    rich_message: RichMessageRequest<'a>,
+#[derive(Debug, Deserialize)]
+struct BotApiEnvelope<T> {
+    ok: bool,
+    result: Option<T>,
+    description: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -5258,6 +5739,16 @@ struct EditMessageRequest {
 }
 
 #[derive(Debug, Serialize)]
+struct EditMessageCaptionRequest {
+    chat_id: i64,
+    message_id: i64,
+    caption: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parse_mode: Option<&'static str>,
+    reply_markup: InlineKeyboardMarkup,
+}
+
+#[derive(Debug, Serialize)]
 struct GetUpdatesRequest<'a> {
     offset: i64,
     timeout: u64,
@@ -5272,7 +5763,7 @@ struct AnswerCallbackRequest<'a> {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct InlineKeyboardMarkup {
+pub struct InlineKeyboardMarkup {
     inline_keyboard: Vec<Vec<InlineKeyboardButton>>,
 }
 
@@ -5286,6 +5777,7 @@ struct InlineKeyboardButton {
 struct BotApiEnvelope<T> {
     ok: bool,
     result: Option<T>,
+    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5398,6 +5890,16 @@ pub struct FakeMutationApprovalCard {
 }
 
 #[derive(Debug, Clone)]
+pub struct FakeOperatorMediaCard {
+    pub message_id: i64,
+    pub chat_id: i64,
+    pub media: CardMedia,
+    pub caption_html: String,
+    pub has_keyboard: bool,
+    pub reply_to_message_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct FakeMutationApprovalEdit {
     pub message_id: i64,
     pub card: MutationApprovalCard,
@@ -5412,6 +5914,7 @@ struct FakeApprovalState {
     sent_cards: Vec<FakeApprovalCard>,
     edits: Vec<FakeApprovalEdit>,
     sent_mutation_cards: Vec<FakeMutationApprovalCard>,
+    sent_media_cards: Vec<FakeOperatorMediaCard>,
     mutation_edits: Vec<FakeMutationApprovalEdit>,
     answers: Vec<(String, String)>,
     sent_operator_rich_messages: Vec<(i64, String, OperatorRichMessageReceipt)>,
@@ -5435,6 +5938,10 @@ impl FakeApprovalBot {
 
     pub async fn sent_mutation_cards(&self) -> Vec<FakeMutationApprovalCard> {
         self.state.lock().await.sent_mutation_cards.clone()
+    }
+
+    pub async fn sent_media_cards(&self) -> Vec<FakeOperatorMediaCard> {
+        self.state.lock().await.sent_media_cards.clone()
     }
 
     pub async fn mutation_edits(&self) -> Vec<FakeMutationApprovalEdit> {
@@ -5563,11 +6070,83 @@ impl ApprovalBot for FakeApprovalBot {
         Ok(())
     }
 
+    async fn send_operator_media_card(
+        &self,
+        chat_id: i64,
+        media: &CardMedia,
+        caption_html: &str,
+        keyboard: Option<&InlineKeyboardMarkup>,
+    ) -> Result<SentCard, ApprovalBotError> {
+        if chat_id == 0 || caption_html.encode_utf16().count() > MAX_MEDIA_CAPTION_UTF16 {
+            return Err(ApprovalBotError::known("BOT_MEDIA_CARD_INVALID"));
+        }
+        let mut state = self.state.lock().await;
+        state.next_message_id = state.next_message_id.saturating_add(1).max(1);
+        let message_id = state.next_message_id;
+        state.sent_media_cards.push(FakeOperatorMediaCard {
+            message_id,
+            chat_id,
+            media: media.clone(),
+            caption_html: caption_html.to_string(),
+            has_keyboard: keyboard.is_some_and(|keyboard| !keyboard.inline_keyboard.is_empty()),
+            reply_to_message_id: None,
+        });
+        if state.lose_next_send_receipt {
+            state.lose_next_send_receipt = false;
+            return Err(ApprovalBotError::uncertain("BOT_API_TRANSPORT_UNCERTAIN"));
+        }
+        Ok(SentCard { message_id })
+    }
+
     async fn send_mutation_card(
         &self,
         card: &MutationApprovalCard,
     ) -> Result<ApprovalCardReceipt, ApprovalBotError> {
         let rendered_text = render_mutation_card(card)?;
+        if let Some(media) = card.media.as_ref() {
+            let keyboard = keyboard_for_mutation(&card.approval);
+            let has_keyboard = !keyboard.inline_keyboard.is_empty();
+            let mut state = self.state.lock().await;
+            if mutation_card_is_media_preview(&rendered_text) {
+                state.next_message_id = state.next_message_id.saturating_add(1).max(1);
+                let message_id = state.next_message_id;
+                state.sent_media_cards.push(FakeOperatorMediaCard {
+                    message_id,
+                    chat_id: card.approval.approval_chat_id,
+                    media: media.clone(),
+                    caption_html: rendered_text.clone(),
+                    has_keyboard,
+                    reply_to_message_id: None,
+                });
+                if state.lose_next_send_receipt {
+                    state.lose_next_send_receipt = false;
+                    return Err(ApprovalBotError::uncertain("BOT_API_TRANSPORT_UNCERTAIN"));
+                }
+                return Ok(ApprovalCardReceipt { message_id });
+            }
+            state.next_message_id = state.next_message_id.saturating_add(1).max(1);
+            let preview_message_id = state.next_message_id;
+            state.sent_media_cards.push(FakeOperatorMediaCard {
+                message_id: preview_message_id,
+                chat_id: card.approval.approval_chat_id,
+                media: media.clone(),
+                caption_html: format!("Предпросмотр: {}", escape_html(&card_preview_file_name(card))),
+                has_keyboard: false,
+                reply_to_message_id: None,
+            });
+            state.next_message_id = state.next_message_id.saturating_add(1).max(1);
+            let message_id = state.next_message_id;
+            state.sent_mutation_cards.push(FakeMutationApprovalCard {
+                message_id,
+                card: card.clone(),
+                rendered_text,
+            });
+            if state.lose_next_send_receipt {
+                state.lose_next_send_receipt = false;
+                return Err(ApprovalBotError::uncertain("BOT_API_TRANSPORT_UNCERTAIN"));
+            }
+            return Ok(ApprovalCardReceipt { message_id });
+        }
         let mut state = self.state.lock().await;
         state.next_message_id = state.next_message_id.saturating_add(1).max(1);
         let message_id = state.next_message_id;
@@ -5724,6 +6303,96 @@ mod tests {
             last_error_message: None,
         }
     }
+    fn sample_send_file_approval(
+        state: MutationApprovalState,
+        caption: &str,
+    ) -> MutationApproval {
+        MutationApproval {
+            approval_id: "72b8f9c1-4d2a-4e6b-9f1a-2c3d4e5f6071".to_string(),
+            mutation_id: "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5".to_string(),
+            schema_version: 1,
+            account_user_id: 900_000_001,
+            action: MutationAction::SendFile {
+                chat_id: "900000007".to_string(),
+                artifact: crate::domain::MutationFileArtifact {
+                    artifact_id: "11111111-1111-1111-1111-111111111111".to_string(),
+                    file_name: "праздник-на-байкале.jpg".to_string(),
+                    size_bytes: 1_572_864,
+                    sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_string(),
+                },
+                caption: caption.to_string(),
+                reply_to_message_id: None,
+                mode: crate::domain::FileSendMode::Photo,
+                random_id: 123_456_789,
+            },
+            payload_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            state,
+            execution_owner: MutationExecutionOwner::ManagedMcp,
+            external_owner_ready: false,
+            external_owner_receipt: None,
+            approval_chat_id: 900_000_003,
+            approval_user_id: 900_000_004,
+            approval_message_id: None,
+            created_at_unix: 1_785_538_258,
+            expires_at_unix: 1_785_624_658,
+            result: None,
+            automated_retry_count: 0,
+            next_retry_at_unix: None,
+            last_error_code: None,
+            last_error_message: None,
+        }
+    }
+
+    fn sample_send_story_approval(
+        state: MutationApprovalState,
+        caption: &str,
+    ) -> MutationApproval {
+        MutationApproval {
+            approval_id: "83c9a0d2-5e3b-4f7c-a02b-3d4e5f607182".to_string(),
+            mutation_id: "b2c3d4e5-f6a7-4b8c-9d0e-f1a2b3c4d5e6".to_string(),
+            schema_version: 1,
+            account_user_id: 900_000_001,
+            action: MutationAction::SendStory {
+                peer_ref: "900000009".to_string(),
+                before_story_ids: Vec::new(),
+                artifact: crate::domain::MutationFileArtifact {
+                    artifact_id: "22222222-2222-2222-2222-222222222222".to_string(),
+                    file_name: "кадр-иркутск.jpg".to_string(),
+                    size_bytes: 2_097_152,
+                    sha256: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+                        .to_string(),
+                },
+                caption: caption.to_string(),
+                privacy: crate::domain::StoryPrivacySpec {
+                    kind: "everyone".to_string(),
+                    selected_user_ids: Vec::new(),
+                    disallowed_user_ids: Vec::new(),
+                },
+                pinned: false,
+                noforwards: false,
+                period_seconds: None,
+                random_id: 987_654_321,
+            },
+            payload_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_string(),
+            state,
+            execution_owner: MutationExecutionOwner::ManagedMcp,
+            external_owner_ready: false,
+            external_owner_receipt: None,
+            approval_chat_id: 900_000_003,
+            approval_user_id: 900_000_004,
+            approval_message_id: None,
+            created_at_unix: 1_785_538_258,
+            expires_at_unix: 1_785_624_658,
+            result: None,
+            automated_retry_count: 0,
+            next_retry_at_unix: None,
+            last_error_code: None,
+            last_error_message: None,
+        }
+    }
 
     #[test]
     fn send_approval_card_is_a_human_decision_surface() {
@@ -5767,6 +6436,7 @@ mod tests {
         let rendered = render_mutation_card(&MutationApprovalCard {
             approval: approval.clone(),
             invite_progress: None,
+            media: None,
         })
         .expect("card");
 
@@ -5846,9 +6516,12 @@ mod tests {
             observed_at_unix: 1_785_540_576,
         }));
 
-        let rendered =
-            render_mutation_card(&MutationApprovalCard { approval, invite_progress: None })
-                .expect("card");
+        let rendered = render_mutation_card(&MutationApprovalCard {
+            approval,
+            invite_progress: None,
+            media: None,
+        })
+        .expect("card");
         assert!(rendered.contains(
             "<a href=\"https://example.test/projects/fixture-3228097\">Synthetic content automation brief</a> · Example Marketplace · fixture_workspace"
         ));
@@ -5866,6 +6539,7 @@ mod tests {
         let rendered = render_mutation_card(&MutationApprovalCard {
             approval: approval.clone(),
             invite_progress: None,
+            media: None,
         })
         .expect("card");
         assert!(rendered.starts_with("✅ <b>Сообщение запланировано</b>"));
@@ -5881,6 +6555,7 @@ mod tests {
         let rendered = render_mutation_card(&MutationApprovalCard {
             approval: approval.clone(),
             invite_progress: None,
+            media: None,
         })
         .expect("card");
 
@@ -5888,6 +6563,125 @@ mod tests {
         assert!(rendered.contains("Ничего не отправлено"));
         assert!(rendered.contains("требуется новое точное подтверждение"));
         assert!(keyboard_for_mutation(&approval).inline_keyboard.is_empty());
+    }
+    #[test]
+    fn send_file_card_is_readable_with_preview_details() {
+        let caption = "Привет, Иркутск! Точный текст подписи.";
+        let approval = sample_send_file_approval(MutationApprovalState::Pending, caption);
+        let rendered = render_mutation_card(&MutationApprovalCard {
+            approval: approval.clone(),
+            invite_progress: None,
+            media: None,
+        })
+        .expect("card");
+        assert!(rendered.starts_with("📤 <b>Отправка в Telegram</b>"));
+        assert!(rendered.contains("<b>Куда:</b> <code>900000007</code>"));
+        assert!(rendered.contains("<b>Что:</b> фото"));
+        assert!(rendered.contains("<code>праздник-на-байкале.jpg</code>"));
+        assert!(rendered.contains("1.5 МБ"));
+        assert!(rendered.contains("<b>Подпись ("));
+        assert!(rendered.contains("<blockquote>Привет, Иркутск! Точный текст подписи.</blockquote>"));
+        assert!(rendered.contains("🔐 <code>0123456789ab…</code>"));
+        assert!(!rendered.contains("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+        assert!(!rendered.contains("Режим:"));
+        assert!(!rendered.contains("SHA-256:"));
+        assert!(!rendered.contains("Mutation:"));
+        assert!(!rendered.contains("Unix"));
+        assert_eq!(mutation_card_parse_mode(&approval.action), Some("HTML"));
+        let keyboard = keyboard_for_mutation(&approval);
+        assert_eq!(keyboard.inline_keyboard.len(), 1);
+        assert_eq!(keyboard.inline_keyboard[0][0].text, "✅ Опубликовать");
+        assert_eq!(keyboard.inline_keyboard[0][1].text, "❌ Отменить");
+    }
+
+    #[test]
+    fn send_story_card_is_readable_with_visibility_and_lifetime() {
+        let approval =
+            sample_send_story_approval(MutationApprovalState::Pending, "Сторис про приёмы");
+        let rendered = render_mutation_card(&MutationApprovalCard {
+            approval: approval.clone(),
+            invite_progress: None,
+            media: None,
+        })
+        .expect("card");
+        assert!(rendered.starts_with("📸 <b>Публикация сторис</b>"));
+        assert!(rendered.contains("<b>Куда:</b> <code>900000009</code>"));
+        assert!(rendered.contains("Кадр:"));
+        assert!(rendered.contains("<code>кадр-иркутск.jpg</code>"));
+        assert!(rendered.contains("2.0 МБ"));
+        assert!(rendered.contains("Видно:"));
+        assert!(rendered.contains("всем"));
+        assert!(rendered.contains("Время жизни:"));
+        assert!(rendered.contains("24 часа"));
+        assert!(rendered.contains("<blockquote>Сторис про приёмы</blockquote>"));
+        assert!(rendered.contains("🔐 <code>fedcba987654…</code>"));
+        assert!(!rendered.contains("Privacy:"));
+        assert!(!rendered.contains("SHA-256:"));
+        assert_eq!(mutation_card_parse_mode(&approval.action), Some("HTML"));
+        let keyboard = keyboard_for_mutation(&approval);
+        assert_eq!(keyboard.inline_keyboard.len(), 1);
+        assert_eq!(keyboard.inline_keyboard[0][0].text, "✅ Опубликовать");
+        assert_eq!(keyboard.inline_keyboard[0][1].text, "❌ Отменить");
+    }
+
+    #[tokio::test]
+    async fn mutation_card_uses_media_preview_for_short_caption() {
+        let approval = sample_send_file_approval(
+            MutationApprovalState::Pending,
+            "Короткая подпись",
+        );
+        let media = CardMedia::from_path(
+            PathBuf::from("/tmp/outbox/photo.jpg"),
+            "photo.jpg",
+        );
+        assert_eq!(media.kind, CardMediaKind::Photo);
+        assert_eq!(media.mime, "image/jpeg");
+        let card = MutationApprovalCard {
+            approval: approval.clone(),
+            invite_progress: None,
+            media: Some(media.clone()),
+        };
+        let rendered = render_mutation_card(&card).expect("card");
+        assert!(rendered.encode_utf16().count() <= MAX_MEDIA_CAPTION_UTF16);
+        let bot = FakeApprovalBot::default();
+        let receipt = bot.send_mutation_card(&card).await.expect("media card");
+        let media_cards = bot.sent_media_cards().await;
+        let text_cards = bot.sent_mutation_cards().await;
+        assert_eq!(media_cards.len(), 1);
+        assert!(text_cards.is_empty());
+        assert_eq!(receipt.message_id, media_cards[0].message_id);
+        assert!(media_cards[0].caption_html.contains("📤 <b>Отправка в Telegram</b>"));
+        assert!(media_cards[0].has_keyboard);
+        assert_eq!(media_cards[0].media, media);
+    }
+
+    #[tokio::test]
+    async fn mutation_card_falls_back_to_preview_plus_reply_for_long_caption() {
+        let long_caption = "я".repeat(1_100);
+        let approval =
+            sample_send_file_approval(MutationApprovalState::Pending, &long_caption);
+        let media = CardMedia::from_path(
+            PathBuf::from("/tmp/outbox/photo.jpg"),
+            "photo.jpg",
+        );
+        let card = MutationApprovalCard {
+            approval: approval.clone(),
+            invite_progress: None,
+            media: Some(media),
+        };
+        let rendered = render_mutation_card(&card).expect("card");
+        assert!(rendered.encode_utf16().count() > MAX_MEDIA_CAPTION_UTF16);
+        let bot = FakeApprovalBot::default();
+        let receipt = bot.send_mutation_card(&card).await.expect("fallback card");
+        let media_cards = bot.sent_media_cards().await;
+        let text_cards = bot.sent_mutation_cards().await;
+        assert_eq!(media_cards.len(), 1);
+        assert_eq!(text_cards.len(), 1);
+        assert_eq!(media_cards[0].caption_html, "Предпросмотр: photo.jpg");
+        assert!(!media_cards[0].has_keyboard);
+        assert_eq!(receipt.message_id, text_cards[0].message_id);
+        assert_eq!(text_cards[0].message_id, media_cards[0].message_id + 1);
+        assert!(text_cards[0].rendered_text.contains(&long_caption));
     }
 
     fn create_fanout_database(path: &Path) -> Connection {

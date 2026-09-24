@@ -13,7 +13,7 @@
 
 use crate::approval::{
     ApprovalAction, ApprovalBot, ApprovalCard, ApprovalDecision, ApprovalKind, ApprovalPolicy,
-    ApprovalWorkerLease, MutationApprovalCard,
+    ApprovalWorkerLease, CardMedia, MutationApprovalCard,
 };
 use crate::backend::TelegramBackend;
 use crate::domain::{
@@ -15401,6 +15401,12 @@ impl McpServer {
             .send_mutation_card(&MutationApprovalCard {
                 approval: request.public.clone(),
                 invite_progress,
+                media: card_media_for_action(
+                    &self.settings.state_db_path,
+                    self.settings.max_upload_bytes,
+                    &request.public.action,
+                )
+                .await,
             })
             .await
         {
@@ -31709,10 +31715,20 @@ impl McpServer {
                 None
             },
         };
+        let card_media = card_media_for_action(
+            &self.settings.state_db_path,
+            self.settings.max_upload_bytes,
+            &approval.action,
+        )
+        .await;
         if let Err(error) = runtime
             .bot
             .edit_mutation_card(
-                &MutationApprovalCard { approval: approval.clone(), invite_progress },
+                &MutationApprovalCard {
+                    approval: approval.clone(),
+                    invite_progress,
+                    media: card_media,
+                },
                 message_id,
             )
             .await
@@ -37501,6 +37517,25 @@ async fn prepared_file_artifact_path(
         ));
     }
     Ok(canonical_file)
+}
+
+/// Медиа для карточки подтверждения: тот же приватный outbox, что и у применения
+/// мутации, поэтому карточка показывает ровно те байты, которые будут отправлены.
+/// Неразрешимый артефакт — не ошибка карточки: она уходит текстом.
+async fn card_media_for_action(
+    state_db_path: &std::path::Path,
+    max_bytes: u64,
+    action: &MutationAction,
+) -> Option<CardMedia> {
+    let artifact = match action {
+        MutationAction::SendFile { artifact, .. }
+        | MutationAction::SendStory { artifact, .. }
+        | MutationAction::SendVoice { artifact, .. }
+        | MutationAction::SendVideoNote { artifact, .. } => artifact,
+        _ => return None,
+    };
+    let path = prepared_file_artifact_path(state_db_path, artifact, max_bytes).await.ok()?;
+    Some(CardMedia::from_path(path, &artifact.file_name))
 }
 
 async fn managed_upload_path(
