@@ -6676,7 +6676,11 @@ mod tests {
         let text_cards = bot.sent_mutation_cards().await;
         assert_eq!(media_cards.len(), 1);
         assert_eq!(text_cards.len(), 1);
-        assert_eq!(media_cards[0].caption_html, "Предпросмотр: photo.jpg");
+        let expected_preview = match &approval.action {
+            MutationAction::SendFile { artifact, .. } => artifact.file_name.clone(),
+            other => panic!("unexpected action: {other:?}"),
+        };
+        assert_eq!(media_cards[0].caption_html, format!("Предпросмотр: {expected_preview}"));
         assert!(!media_cards[0].has_keyboard);
         assert_eq!(receipt.message_id, text_cards[0].message_id);
         assert_eq!(text_cards[0].message_id, media_cards[0].message_id + 1);
