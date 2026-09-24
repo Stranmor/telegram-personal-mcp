@@ -39,7 +39,7 @@ rmcp = { version = "=1.7.0", features = ["transport-io"] }
 # reference SDK helpers that do not exist in this pinned protocol generation.
 rmcp-macros = "=1.7.0"
 rpassword = "7"
-reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "socks"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "socks", "multipart"] }
 regex = "1"
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
 schemars = "1"
