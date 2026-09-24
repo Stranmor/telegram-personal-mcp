@@ -8,6 +8,17 @@ and releases use [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Approval cards now carry the media they will publish: a mutation card whose
+  action owns a local artifact is sent as a native Telegram media message
+  (`sendPhoto`/`sendVideo`/`sendAnimation`/`sendVoice`/`sendDocument`) with the
+  card text as its caption and the same inline keyboard, so the operator sees
+  the exact frame before approving. When the caption would exceed Telegram's
+  1024 UTF-16 limit, the media is sent first with a short `Предпросмотр: …`
+  caption and the full text card with the buttons follows as a reply. Card text
+  for file and story mutations is human-readable (destination, file size,
+  caption length, visibility and lifetime) instead of raw identifiers and
+  hashes, and state edits fall back from `editMessageText` to
+  `editMessageCaption` for media cards.
 - Added the operator-only `maintenance expire-stale` command. It supports a
   read-only `--dry-run`, requires explicit offline delivery evidence to bind
   dormant unknown outcomes, and archives then deletes only prepared rows
