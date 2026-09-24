@@ -5718,6 +5718,12 @@ struct BotApiEnvelope<T> {
 }
 
 #[derive(Debug, Serialize)]
+struct SendRichMessageRequest<'a> {
+    chat_id: i64,
+    rich_message: RichMessageRequest<'a>,
+}
+
+#[derive(Debug, Serialize)]
 struct RichMessageRequest<'a> {
     html: &'a str,
     skip_entity_detection: bool,
@@ -5771,13 +5777,6 @@ pub struct InlineKeyboardMarkup {
 struct InlineKeyboardButton {
     text: String,
     callback_data: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct BotApiEnvelope<T> {
-    ok: bool,
-    result: Option<T>,
-    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
