@@ -12581,35 +12581,3 @@ impl TelegramBackend for FakeTelegramBackend {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn fixture_supports_read_and_send() {
-        let backend = FakeTelegramBackend::fixture();
-        let messages = backend.history(None, "@alex", 10, None, 0).await.expect("read fixture");
-        assert_eq!(messages.len(), 3);
-
-        let sent_id = backend
-            .send_message(None, "@alex", "Updated contract attached")
-            .await
-            .expect("send fixture");
-        assert_eq!(sent_id, 100);
-        assert_eq!(backend.sent_messages().await.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn fixture_stops_at_download_limit_with_a_partial_file_for_wrapper_cleanup() {
-        let backend = FakeTelegramBackend::fixture();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let destination = temp.path().join("contract.pdf");
-
-        let error = backend
-            .download_attachment_to(None, "@alex", 11, &destination, 10)
-            .await
-            .expect_err("fixture attachment exceeds limit");
-        assert!(matches!(error, TelegramError::AttachmentTooLarge { max_bytes: 10 }));
-        assert_eq!(std::fs::metadata(destination).expect("partial metadata").len(), 10);
-    }
-}

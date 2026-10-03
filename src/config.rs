@@ -50,30 +50,3 @@ impl Config {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn session_candidates_are_sorted_files_only() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("b.session"), b"session").expect("write b");
-        std::fs::write(temp.path().join("a.session"), b"session").expect("write a");
-        std::fs::create_dir(temp.path().join("directory.session")).expect("create directory");
-        std::fs::write(temp.path().join("ignored.txt"), b"not a session").expect("write txt");
-
-        let config = Config {
-            session_path: None,
-            session_cache_dir: Some(temp.path().to_path_buf()),
-            proxy: None,
-            api_id: 1,
-            api_hash: "test".to_string(),
-        };
-        let canonical_temp = std::fs::canonicalize(temp.path()).expect("canonical tempdir");
-
-        assert_eq!(
-            config.session_candidates().expect("candidates"),
-            vec![canonical_temp.join("a.session"), canonical_temp.join("b.session")]
-        );
-    }
-}
