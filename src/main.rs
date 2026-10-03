@@ -788,3 +788,125 @@ fn normalize_phone(raw: &str) -> std::result::Result<String, &'static str> {
     Ok(format!("+{digits}"))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn phone_parser_normalizes_common_formatting() {
+        assert_eq!(normalize_phone(" +1 (415) 555-0132 "), Ok("+14155550132".to_string()));
+    }
+
+    #[test]
+    fn phone_parser_requires_international_format() {
+        assert_eq!(
+            normalize_phone("4155550132"),
+            Err("phone number must start with + and include the country code")
+        );
+    }
+
+    #[test]
+    fn phone_parser_rejects_letters_and_impossible_lengths() {
+        assert_eq!(
+            normalize_phone("+1-800-FLOWERS"),
+            Err("phone number contains unsupported characters")
+        );
+        assert_eq!(
+            normalize_phone("+123"),
+            Err("phone number must contain between 7 and 15 digits")
+        );
+    }
+
+    #[test]
+    fn message_cache_retention_parser_is_bounded_and_forwarded_to_daemon() {
+        let args = Args::try_parse_from([
+            "telegram-personal-mcp",
+            "--demo",
+            "--message-cache-max-age-days",
+            "30",
+            "serve",
+        ])
+        .expect("valid retention CLI");
+        assert_eq!(args.message_cache_max_age_days, Some(30));
+        let child = daemon_child_arguments(&args)
+            .into_iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            child.windows(2).any(|pair| pair == ["--message-cache-max-age-days", "30"]),
+            "proxy startup must preserve the retention policy for the daemon child"
+        );
+
+        for invalid in ["0", "36501", "not-a-number"] {
+            assert!(
+                Args::try_parse_from([
+                    "telegram-personal-mcp",
+                    "--message-cache-max-age-days",
+                    invalid,
+                    "serve",
+                ])
+                .is_err(),
+                "{invalid:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_identity_binds_the_exact_executable_bytes() {
+        let temporary = tempdir().expect("temporary directory");
+        let first = temporary.path().join("first");
+        let second = temporary.path().join("second");
+        std::fs::write(&first, b"generation-a").expect("first executable fixture");
+        std::fs::write(&second, b"generation-b").expect("second executable fixture");
+
+        let mut first_identity = Sha256::new();
+        hash_daemon_identity_file(&mut first_identity, "executable_sha256", &first)
+            .expect("first identity");
+        let mut repeated_identity = Sha256::new();
+        hash_daemon_identity_file(&mut repeated_identity, "executable_sha256", &first)
+            .expect("repeated identity");
+        let mut second_identity = Sha256::new();
+        hash_daemon_identity_file(&mut second_identity, "executable_sha256", &second)
+            .expect("second identity");
+
+        assert_eq!(first_identity.finalize(), repeated_identity.finalize());
+        assert_ne!(Sha256::digest(b"generation-a"), Sha256::digest(b"generation-b"));
+        assert_ne!(
+            {
+                let mut value = Sha256::new();
+                hash_daemon_identity_file(&mut value, "executable_sha256", &first)
+                    .expect("first comparison identity");
+                value.finalize()
+            },
+            second_identity.finalize()
+        );
+    }
+
+    #[test]
+    fn explicit_daemon_executable_is_absolute_and_byte_identified() {
+        let temporary = tempdir().expect("temporary directory");
+        let executable = temporary.path().join("compatible-daemon");
+        std::fs::write(&executable, b"compatible-generation").expect("daemon executable fixture");
+        let args = Args::try_parse_from([
+            "telegram-personal-mcp",
+            "--demo",
+            "--daemon-executable",
+            executable.to_str().expect("UTF-8 fixture path"),
+            "serve",
+        ])
+        .expect("explicit daemon executable");
+
+        assert_eq!(selected_daemon_executable(&args).expect("selected daemon"), executable);
+        assert!(daemon_config_identity(&args, &executable).is_ok());
+
+        let relative = Args::try_parse_from([
+            "telegram-personal-mcp",
+            "--daemon-executable",
+            "relative-daemon",
+            "serve",
+        ])
+        .expect("relative path is parsed before semantic validation");
+        assert!(selected_daemon_executable(&relative).is_err());
+    }
+}

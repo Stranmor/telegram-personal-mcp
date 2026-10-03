@@ -80,3 +80,74 @@ fn io_to_sql(error: std::io::Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opener_applies_wal_foreign_keys_timeout_and_typed_synchronous_modes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("private").join("state.sqlite");
+
+        let connection = open_private_wal(&path, SynchronousMode::Full).expect("open full");
+        let journal: String = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .expect("journal mode");
+        let foreign_keys: i64 = connection
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .expect("foreign keys");
+        let synchronous: i64 = connection
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .expect("synchronous");
+        let busy_timeout: i64 = connection
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .expect("busy timeout");
+        assert_eq!(journal.to_ascii_lowercase(), "wal");
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(synchronous, 2);
+        assert_eq!(busy_timeout, 5_000);
+        drop(connection);
+
+        let connection = open_private_wal(&path, SynchronousMode::Normal).expect("open normal");
+        let synchronous: i64 = connection
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .expect("synchronous");
+        assert_eq!(synchronous, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_directory_and_existing_wal_sidecars_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let directory = temp.path().join("private");
+        let path = directory.join("state.sqlite");
+        let connection = open_private_wal(&path, SynchronousMode::Normal).expect("open");
+        connection
+            .execute_batch(
+                "CREATE TABLE sample (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO sample (value) VALUES ('one');",
+            )
+            .expect("write WAL state");
+        restrict_private_sqlite_files(&path).expect("restrict sidecars");
+
+        assert_eq!(
+            std::fs::metadata(&directory).expect("directory metadata").permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&path).expect("database metadata").permissions().mode() & 0o777,
+            0o600
+        );
+        for sidecar in sqlite_sidecars(&path) {
+            if sidecar.exists() {
+                assert_eq!(
+                    std::fs::metadata(sidecar).expect("sidecar metadata").permissions().mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+        }
+    }
+}
