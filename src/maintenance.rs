@@ -1005,30 +1005,68 @@ mod tests {
     }
 
     #[test]
-    fn apply_confirms_a_verified_applied_outcome() {
+    fn apply_confirms_every_verified_applied_outcome() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("state.sqlite");
         seed_dormant_unknown(&path, "appr-v", "mut-v");
+        seed_dormant_unknown(&path, "appr-v2", "mut-v2");
         let report = expire_stale(
             &path,
             &ExpireStaleOptions {
                 dry_run: false,
                 archive_path: Some(temp.path().join("archive.json")),
-                confirm_unknown: vec!["appr-v=395649".to_string()],
+                confirm_unknown: vec!["appr-v=395649".to_string(), "appr-v2=395650".to_string()],
                 ..ExpireStaleOptions::default()
             },
         )
         .expect("apply");
         assert_eq!(report.counts_after.unknown_approvals, 0);
-        assert_eq!(report.unknowns_confirmed.len(), 1);
-        assert_eq!(report.unknowns_confirmed[0].result_kind, "voice_sent");
-        let (state, code, _) = approval_row(&path, "appr-v");
-        assert_eq!(state, "applied");
-        assert!(code.is_none());
-        assert_eq!(mutation_state(&path, "mut-v"), "applied");
-        let result = mutation_result(&path, "mut-v");
-        assert_eq!(result.pointer("/kind").and_then(|value| value.as_str()), Some("voice_sent"));
-        assert_eq!(result.pointer("/message_id").and_then(|value| value.as_i64()), Some(395649));
+        assert_eq!(report.unknowns_confirmed.len(), 2);
+        assert!(
+            report.unknowns_confirmed.iter().all(|entry| entry.result_kind == "voice_sent"),
+            "unexpected kinds: {report:?}"
+        );
+        for (approval_id, mutation_id, message_id) in
+            [("appr-v", "mut-v", 395649), ("appr-v2", "mut-v2", 395650)]
+        {
+            let (state, code, _) = approval_row(&path, approval_id);
+            assert_eq!(state, "applied");
+            assert!(code.is_none());
+            assert_eq!(mutation_state(&path, mutation_id), "applied");
+            let result = mutation_result(&path, mutation_id);
+            assert_eq!(
+                result.pointer("/kind").and_then(|value| value.as_str()),
+                Some("voice_sent")
+            );
+            assert_eq!(
+                result.pointer("/message_id").and_then(|value| value.as_i64()),
+                Some(i64::from(message_id))
+            );
+        }
+    }
+
+    #[test]
+    fn apply_resolves_every_supplied_no_effect_id() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        seed_dormant_unknown(&path, "appr-m1", "mut-m1");
+        seed_dormant_unknown(&path, "appr-m2", "mut-m2");
+        seed_dormant_unknown(&path, "appr-m3", "mut-m3");
+        let report = expire_stale(
+            &path,
+            &ExpireStaleOptions {
+                dry_run: false,
+                archive_path: Some(temp.path().join("archive.json")),
+                confirm_no_effect: vec!["appr-m1".to_string(), "appr-m3".to_string()],
+                ..ExpireStaleOptions::default()
+            },
+        )
+        .expect("apply");
+        assert_eq!(report.counts_after.unknown_approvals, 1);
+        assert_eq!(report.unknowns_no_effect.len(), 2);
+        assert_eq!(approval_row(&path, "appr-m1").0, "failed");
+        assert_eq!(approval_row(&path, "appr-m2").0, "outcome_unknown");
+        assert_eq!(approval_row(&path, "appr-m3").0, "failed");
     }
 
     #[test]
@@ -1096,6 +1134,39 @@ mod tests {
         );
         assert_eq!(approval_row(&path, "appr-d").0, "outcome_unknown");
         assert_eq!(mutation_state(&path, "mut-d"), "outcome_unknown");
+        assert!(!archive.exists());
+    }
+
+    #[test]
+    fn rejects_non_outcome_unknown_rows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        seed_dormant_unknown(&path, "appr-e", "mut-e");
+        let connection = open_private_wal(&path, SynchronousMode::Full).expect("open");
+        connection
+            .execute(
+                "UPDATE mutation_approvals SET state = 'expired', decided_at = 1600
+                 WHERE approval_id = 'appr-e'",
+                [],
+            )
+            .expect("expire the fixture row");
+        drop(connection);
+        let archive = temp.path().join("archive.json");
+        let err = expire_stale(
+            &path,
+            &ExpireStaleOptions {
+                dry_run: false,
+                archive_path: Some(archive.clone()),
+                confirm_no_effect: vec!["appr-e".to_string()],
+                ..ExpireStaleOptions::default()
+            },
+        )
+        .expect_err("a non-outcome_unknown row must not be resolved");
+        assert!(
+            err.to_string().contains("does not match a dormant outcome_unknown approval"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(approval_row(&path, "appr-e").0, "expired");
         assert!(!archive.exists());
     }
 
