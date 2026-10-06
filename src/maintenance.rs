@@ -1,8 +1,10 @@
 //! One-shot maintenance for dormant approval-ledger state.
 //!
-//! This is intentionally narrower than the live approval tools. It can only
+//! This is intentionally narrower than the live approval tools. It can
 //! (a) bind an explicitly supplied, independently verified Telegram message
-//! id to a dormant `outcome_unknown` mutation and (b) archive/delete
+//! id to a dormant `outcome_unknown` mutation, (b) resolve a dormant
+//! `outcome_unknown` mutation as a known failure when offline verification
+//! shows the approved effect did not materialize, and (c) archive/delete
 //! `prepared` rows that have no active approval. The state schema has no
 //! terminal state for a prepared draft, so deletion is paired with a durable
 //! JSON archive instead of changing the schema or inventing a state.
@@ -15,9 +17,15 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::domain::{MutationAction, MutationResult};
+use crate::domain::{MutationAction, MutationResult, SentDocumentMediaSummary};
 use crate::mutation_ledger::MutationLedger;
 use crate::state_db::{SynchronousMode, open_private_wal};
+
+/// Approval error code recorded when offline maintenance verifies that the
+/// approved effect never materialized.
+const VERIFIED_NO_EFFECT_CODE: &str = "MUTATION_VERIFIED_NO_EFFECT";
+const VERIFIED_NO_EFFECT_MESSAGE: &str =
+    "offline maintenance: independent verification found no effect";
 
 #[derive(Debug, Clone, Default)]
 pub struct ExpireStaleOptions {
@@ -25,6 +33,9 @@ pub struct ExpireStaleOptions {
     pub archive_path: Option<PathBuf>,
     /// Exact confirmation pairs. A pair is accepted only when the approval is currently a dormant `outcome_unknown` row.
     pub confirm_unknown: Vec<String>,
+    /// Approval ids independently verified to have had no effect. Only
+    /// dormant `outcome_unknown` rows are accepted.
+    pub confirm_no_effect: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -33,6 +44,12 @@ pub struct UnknownConfirmation {
     pub mutation_id: String,
     pub message_id: i32,
     pub result_kind: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UnknownNoEffect {
+    pub approval_id: String,
+    pub mutation_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -47,6 +64,7 @@ pub struct ExpireStaleReport {
     pub dry_run: bool,
     pub archive_path: Option<PathBuf>,
     pub unknowns_confirmed: Vec<UnknownConfirmation>,
+    pub unknowns_no_effect: Vec<UnknownNoEffect>,
     pub prepared_mutations_deleted: Vec<String>,
     pub mutation_approvals_deleted: Vec<String>,
     pub prepared_sends_deleted: Vec<String>,
@@ -70,6 +88,7 @@ pub fn expire_stale(
     options: &ExpireStaleOptions,
 ) -> Result<ExpireStaleReport> {
     let confirmations = parse_confirmations(&options.confirm_unknown)?;
+    let no_effect_ids = parse_no_effect(&options.confirm_no_effect)?;
     let connection = open_private_wal(state_db_path, SynchronousMode::Full)
         .with_context(|| format!("failed to open state database {}", state_db_path.display()))?;
 
@@ -118,11 +137,29 @@ pub fn expire_stale(
             bail!("confirmation {approval_id} does not match a dormant outcome_unknown approval");
         }
     }
+    let mut unknowns_no_effect = Vec::new();
+    for approval_id in &no_effect_ids {
+        if confirmations.contains_key(approval_id.as_str()) {
+            bail!(
+                "approval {approval_id} is supplied both as an applied confirmation and as a no-effect confirmation"
+            );
+        }
+        let Some(spec) = unknown_specs.iter().find(|spec| &spec.approval_id == approval_id) else {
+            bail!(
+                "no-effect confirmation {approval_id} does not match a dormant outcome_unknown approval"
+            );
+        };
+        unknowns_no_effect.push(UnknownNoEffect {
+            approval_id: spec.approval_id.clone(),
+            mutation_id: spec.mutation_id.clone(),
+        });
+    }
 
     let mut report = ExpireStaleReport {
         dry_run: options.dry_run,
         archive_path: None,
         unknowns_confirmed,
+        unknowns_no_effect,
         prepared_mutations_deleted: stale_mutation_ids,
         mutation_approvals_deleted: mutation_approval_ids,
         prepared_sends_deleted: stale_send_ids,
@@ -145,6 +182,7 @@ pub fn expire_stale(
         &archive_path,
         &unknown_rows,
         &report.unknowns_confirmed,
+        &report.unknowns_no_effect,
         &stale_mutation_rows,
         &mutation_approval_rows,
         &handoff_rows,
@@ -155,6 +193,7 @@ pub fn expire_stale(
     report.archive_path = Some(archive_path);
 
     confirm_unknowns(state_db_path, &unknown_specs, &mut report.unknowns_confirmed)?;
+    mark_no_effect(state_db_path, &report.unknowns_no_effect)?;
     delete_stale(state_db_path, &report)?;
 
     let after_connection = open_private_wal(state_db_path, SynchronousMode::Full)
@@ -183,6 +222,20 @@ fn parse_confirmations(entries: &[String]) -> Result<BTreeMap<String, i32>> {
         }
     }
     Ok(confirmations)
+}
+
+fn parse_no_effect(entries: &[String]) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    for entry in entries {
+        let id = entry.trim();
+        if id.is_empty() {
+            bail!("no-effect confirmation has an empty approval id");
+        }
+        if !ids.insert(id.to_string()) {
+            bail!("no-effect confirmations contain duplicate approval id {id}");
+        }
+    }
+    Ok(ids)
 }
 
 fn state_counts(connection: &rusqlite::Connection) -> Result<StateCounts> {
@@ -437,6 +490,7 @@ fn write_archive(
     path: &Path,
     unknown_rows: &[JsonRow],
     confirmations: &[UnknownConfirmation],
+    no_effect: &[UnknownNoEffect],
     mutation_rows: &[JsonRow],
     mutation_approval_rows: &[JsonRow],
     handoff_rows: &[JsonRow],
@@ -453,6 +507,7 @@ fn write_archive(
         "reason": "maintenance expire-stale: dormant prepared drafts and confirmed unknown outcomes",
         "dormant_unknown_approvals": unknown_rows,
         "offline_confirmations": confirmations,
+        "verified_no_effect": no_effect,
         "stale_prepared_mutations": mutation_rows,
         "stale_mutation_approvals": mutation_approval_rows,
         "stale_mutation_handoffs": handoff_rows,
@@ -499,6 +554,27 @@ fn confirm_unknowns(
     Ok(())
 }
 
+fn mark_no_effect(state_db_path: &Path, entries: &[UnknownNoEffect]) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let ledger = MutationLedger::new(state_db_path.to_path_buf());
+    let now = now_unix();
+    for entry in entries {
+        ledger
+            .mark_known_failure(&entry.approval_id, VERIFIED_NO_EFFECT_CODE, now)
+            .with_context(|| {
+                format!("failed to mark {} as verified no-effect", entry.approval_id)
+            })?;
+        ledger
+            .set_last_error_message(&entry.approval_id, Some(VERIFIED_NO_EFFECT_MESSAGE))
+            .with_context(|| {
+                format!("failed to record the no-effect note for {}", entry.approval_id)
+            })?;
+    }
+    Ok(())
+}
+
 fn confirmation_result(action: &MutationAction, message_id: i32) -> Result<MutationResult> {
     match action {
         MutationAction::SendFile { artifact, .. } => {
@@ -517,8 +593,32 @@ fn confirmation_result(action: &MutationAction, message_id: i32) -> Result<Mutat
                 sha256: artifact.sha256.clone(),
             })
         },
+        MutationAction::SendVoice { artifact, .. } => Ok(MutationResult::VoiceSent {
+            message_id,
+            sha256: artifact.sha256.clone(),
+            media: SentDocumentMediaSummary {
+                media_type: "voice".to_string(),
+                mime_type: "audio/ogg".to_string(),
+                duration_seconds: None,
+                width_px: None,
+                height_px: None,
+            },
+        }),
+        MutationAction::SendVideoNote { artifact, duration_seconds, length_pixels, .. } => {
+            Ok(MutationResult::VideoNoteSent {
+                message_id,
+                sha256: artifact.sha256.clone(),
+                media: SentDocumentMediaSummary {
+                    media_type: "video_note".to_string(),
+                    mime_type: "video/mp4".to_string(),
+                    duration_seconds: Some(*duration_seconds),
+                    width_px: Some(*length_pixels),
+                    height_px: Some(*length_pixels),
+                },
+            })
+        },
         _ => bail!(
-            "offline confirmation supports only send_file, schedule_message, and schedule_file"
+            "offline confirmation supports only send_file, send_voice, send_video_note, schedule_message, and schedule_file"
         ),
     }
 }
@@ -528,6 +628,8 @@ fn result_kind_name(result: &MutationResult) -> &'static str {
         MutationResult::FileSent { .. } => "file_sent",
         MutationResult::MessageScheduled { .. } => "message_scheduled",
         MutationResult::FileScheduled { .. } => "file_scheduled",
+        MutationResult::VoiceSent { .. } => "voice_sent",
+        MutationResult::VideoNoteSent { .. } => "video_note_sent",
         _ => "other",
     }
 }
@@ -667,4 +769,270 @@ fn question_marks(count: usize) -> String {
 fn now_unix() -> i64 {
     i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
         .unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{CaptionParseMode, MutationFileArtifact};
+
+    fn artifact() -> MutationFileArtifact {
+        MutationFileArtifact {
+            artifact_id: "art-1".to_string(),
+            file_name: "probe.ogg".to_string(),
+            size_bytes: 1234,
+            sha256: "aa".repeat(32),
+        }
+    }
+
+    #[test]
+    fn offline_confirmation_builds_voice_result() {
+        let action = voice_action();
+        let result = confirmation_result(&action, 395649).expect("voice confirmation");
+        match result {
+            MutationResult::VoiceSent { message_id, sha256, media } => {
+                assert_eq!(message_id, 395649);
+                assert_eq!(sha256, "aa".repeat(32));
+                assert_eq!(media.media_type, "voice");
+                assert!(media.mime_type.starts_with("audio/"));
+                assert_eq!(media.width_px, None);
+            },
+            other => panic!("unexpected result {other:?}"),
+        }
+    }
+
+    #[test]
+    fn offline_confirmation_builds_video_note_result() {
+        let action = MutationAction::SendVideoNote {
+            chat_id: "8816022027".to_string(),
+            artifact: artifact(),
+            duration_seconds: 2,
+            length_pixels: 240,
+            reply_to_message_id: None,
+            topic_id: None,
+            silent: true,
+            noforwards: false,
+            random_id: 2,
+        };
+        let result = confirmation_result(&action, 395651).expect("video-note confirmation");
+        match result {
+            MutationResult::VideoNoteSent { message_id, media, .. } => {
+                assert_eq!(message_id, 395651);
+                assert_eq!(media.media_type, "video_note");
+                assert_eq!(media.mime_type, "video/mp4");
+                assert_eq!(media.duration_seconds, Some(2));
+                assert_eq!(media.width_px, Some(240));
+                assert_eq!(media.height_px, Some(240));
+            },
+            other => panic!("unexpected result {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_effect_ids_must_be_non_empty_and_unique() {
+        assert!(parse_no_effect(&[]).unwrap().is_empty());
+        assert!(parse_no_effect(&[" ".to_string()]).is_err());
+        assert!(parse_no_effect(&["a".to_string(), "a".to_string()]).is_err());
+        assert_eq!(parse_no_effect(&[" a ".to_string()]).unwrap().len(), 1);
+    }
+
+    fn voice_action() -> MutationAction {
+        MutationAction::SendVoice {
+            chat_id: "8816022027".to_string(),
+            artifact: artifact(),
+            caption: String::new(),
+            caption_parse_mode: CaptionParseMode::Plain,
+            reply_to_message_id: None,
+            topic_id: None,
+            silent: false,
+            noforwards: false,
+            random_id: 1,
+        }
+    }
+
+    /// The ledger's own schema (created on first use) plus one production-shaped
+    /// dormant `outcome_unknown` pair.
+    fn seed_dormant_unknown(path: &Path, approval_id: &str, mutation_id: &str) {
+        let _ = MutationLedger::new(path.to_path_buf()).get("schema-seed");
+        let connection = open_private_wal(path, SynchronousMode::Full).expect("open fixture");
+        let action_json = serde_json::to_string(&voice_action()).expect("action json");
+        connection
+            .execute(
+                "INSERT INTO prepared_mutations (mutation_id, schema_version, account_user_id,
+                     action_json, payload_sha256, state, result_json, created_at)
+                 VALUES (?1, 1, 700, ?2, 'payload-sha', 'outcome_unknown', NULL, 1000)",
+                params![mutation_id, action_json],
+            )
+            .expect("insert mutation");
+        connection
+            .execute(
+                "INSERT INTO mutation_approvals (approval_id, mutation_id, payload_sha256, state,
+                     approval_chat_id, approval_user_id, bot_message_id, created_at, expires_at,
+                     decided_at, automated_retry_count, next_retry_at, last_error_code,
+                     last_error_message)
+                 VALUES (?1, ?2, 'payload-sha', 'outcome_unknown', 700, 700, NULL, 1000, 2000,
+                     NULL, 2, NULL, 'MUTATION_OUTCOME_UNKNOWN', 'fixture')",
+                params![approval_id, mutation_id],
+            )
+            .expect("insert approval");
+    }
+
+    fn approval_row(path: &Path, approval_id: &str) -> (String, Option<String>, Option<String>) {
+        let connection = open_private_wal(path, SynchronousMode::Full).expect("open");
+        connection
+            .query_row(
+                "SELECT state, last_error_code, last_error_message
+                 FROM mutation_approvals WHERE approval_id = ?1",
+                [approval_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("approval row")
+    }
+
+    fn mutation_state(path: &Path, mutation_id: &str) -> String {
+        let connection = open_private_wal(path, SynchronousMode::Full).expect("open");
+        connection
+            .query_row(
+                "SELECT state FROM prepared_mutations WHERE mutation_id = ?1",
+                [mutation_id],
+                |row| row.get(0),
+            )
+            .expect("mutation row")
+    }
+
+    fn mutation_result(path: &Path, mutation_id: &str) -> serde_json::Value {
+        let connection = open_private_wal(path, SynchronousMode::Full).expect("open");
+        let raw: String = connection
+            .query_row(
+                "SELECT result_json FROM prepared_mutations WHERE mutation_id = ?1",
+                [mutation_id],
+                |row| row.get(0),
+            )
+            .expect("result json");
+        serde_json::from_str(&raw).expect("result parses")
+    }
+
+    #[test]
+    fn dry_run_reports_no_effect_without_writing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        seed_dormant_unknown(&path, "appr-a", "mut-a");
+        let report = expire_stale(
+            &path,
+            &ExpireStaleOptions {
+                dry_run: true,
+                confirm_no_effect: vec!["appr-a".to_string()],
+                ..ExpireStaleOptions::default()
+            },
+        )
+        .expect("dry run");
+        assert_eq!(report.unknowns_no_effect.len(), 1);
+        assert_eq!(report.unknowns_no_effect[0].approval_id, "appr-a");
+        assert_eq!(report.unknowns_no_effect[0].mutation_id, "mut-a");
+        assert_eq!(report.counts_after.unknown_approvals, 1);
+        assert_eq!(approval_row(&path, "appr-a").0, "outcome_unknown");
+    }
+
+    #[test]
+    fn apply_marks_only_the_confirmed_no_effect_rows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        seed_dormant_unknown(&path, "appr-a", "mut-a");
+        seed_dormant_unknown(&path, "appr-b", "mut-b");
+        let archive = temp.path().join("archive.json");
+        let report = expire_stale(
+            &path,
+            &ExpireStaleOptions {
+                dry_run: false,
+                archive_path: Some(archive.clone()),
+                confirm_no_effect: vec!["appr-a".to_string()],
+                ..ExpireStaleOptions::default()
+            },
+        )
+        .expect("apply");
+        assert_eq!(report.counts_after.unknown_approvals, 1);
+        assert_eq!(report.archive_path, Some(archive.clone()));
+        let (state, code, message) = approval_row(&path, "appr-a");
+        assert_eq!(state, "failed");
+        assert_eq!(code.as_deref(), Some(VERIFIED_NO_EFFECT_CODE));
+        assert_eq!(message.as_deref(), Some(VERIFIED_NO_EFFECT_MESSAGE));
+        assert_eq!(mutation_state(&path, "mut-a"), "prepared");
+        assert_eq!(approval_row(&path, "appr-b").0, "outcome_unknown");
+        assert_eq!(mutation_state(&path, "mut-b"), "outcome_unknown");
+        let archived: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&archive).expect("archive readable"),
+        )
+        .expect("archive json");
+        let verified = archived
+            .pointer("/verified_no_effect")
+            .and_then(|value| value.as_array())
+            .expect("verified_no_effect section");
+        assert_eq!(verified.len(), 1);
+        assert_eq!(
+            verified[0].get("approval_id").and_then(|value| value.as_str()),
+            Some("appr-a")
+        );
+    }
+
+    #[test]
+    fn apply_confirms_a_verified_applied_outcome() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        seed_dormant_unknown(&path, "appr-v", "mut-v");
+        let report = expire_stale(
+            &path,
+            &ExpireStaleOptions {
+                dry_run: false,
+                archive_path: Some(temp.path().join("archive.json")),
+                confirm_unknown: vec!["appr-v=395649".to_string()],
+                ..ExpireStaleOptions::default()
+            },
+        )
+        .expect("apply");
+        assert_eq!(report.counts_after.unknown_approvals, 0);
+        assert_eq!(report.unknowns_confirmed.len(), 1);
+        assert_eq!(report.unknowns_confirmed[0].result_kind, "voice_sent");
+        let (state, code, _) = approval_row(&path, "appr-v");
+        assert_eq!(state, "applied");
+        assert!(code.is_none());
+        assert_eq!(mutation_state(&path, "mut-v"), "applied");
+        let result = mutation_result(&path, "mut-v");
+        assert_eq!(result.pointer("/kind").and_then(|value| value.as_str()), Some("voice_sent"));
+        assert_eq!(result.pointer("/message_id").and_then(|value| value.as_i64()), Some(395649));
+    }
+
+    #[test]
+    fn rejects_no_effect_intersection_and_unknown_ids() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        seed_dormant_unknown(&path, "appr-x", "mut-x");
+        let err = expire_stale(
+            &path,
+            &ExpireStaleOptions {
+                dry_run: true,
+                confirm_unknown: vec!["appr-x=5".to_string()],
+                confirm_no_effect: vec!["appr-x".to_string()],
+                ..ExpireStaleOptions::default()
+            },
+        )
+        .expect_err("intersection must be rejected");
+        assert!(
+            err.to_string().contains("both as an applied confirmation"),
+            "unexpected error: {err}"
+        );
+        let err = expire_stale(
+            &path,
+            &ExpireStaleOptions {
+                dry_run: true,
+                confirm_no_effect: vec!["missing-approval".to_string()],
+                ..ExpireStaleOptions::default()
+            },
+        )
+        .expect_err("unknown id must be rejected");
+        assert!(
+            err.to_string().contains("does not match a dormant outcome_unknown approval"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(approval_row(&path, "appr-x").0, "outcome_unknown");
+    }
 }

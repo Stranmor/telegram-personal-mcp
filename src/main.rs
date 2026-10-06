@@ -110,6 +110,9 @@ enum MaintenanceCommand {
         /// Explicit confirmation for one unknown outcome, as approval and message identifiers joined by '='.
         #[arg(long = "confirm-unknown", value_name = "PAIR")]
         confirm_unknown: Vec<String>,
+        /// Explicit confirmation that one unknown outcome had no effect, as an independently verified approval id.
+        #[arg(long = "confirm-no-effect", value_name = "APPROVAL_ID")]
+        confirm_no_effect: Vec<String>,
         #[arg(long)]
         archive_path: Option<PathBuf>,
     },
@@ -181,7 +184,12 @@ async fn main() -> Result<()> {
         Some(Command::Daemon) => return daemon(&args).await,
         Some(Command::Direct) => return direct(&args).await,
         Some(Command::Maintenance {
-            command: MaintenanceCommand::ExpireStale { dry_run, confirm_unknown, archive_path },
+            command: MaintenanceCommand::ExpireStale {
+                dry_run,
+                confirm_unknown,
+                confirm_no_effect,
+                archive_path,
+            },
         }) => {
             let state_db_path = effective_server_settings(&args).state_db_path;
             let report = telegram_personal_mcp::maintenance::expire_stale(
@@ -190,6 +198,7 @@ async fn main() -> Result<()> {
                     dry_run: *dry_run,
                     archive_path: archive_path.clone(),
                     confirm_unknown: confirm_unknown.clone(),
+                    confirm_no_effect: confirm_no_effect.clone(),
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
