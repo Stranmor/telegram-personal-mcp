@@ -871,10 +871,26 @@ mod tests {
                      decided_at, automated_retry_count, next_retry_at, last_error_code,
                      last_error_message)
                  VALUES (?1, ?2, 'payload-sha', 'outcome_unknown', 700, 700, NULL, 1000, 2000,
-                     NULL, 2, NULL, 'MUTATION_OUTCOME_UNKNOWN', 'fixture')",
+                     1500, 2, NULL, 'MUTATION_OUTCOME_UNKNOWN', 'fixture')",
                 params![approval_id, mutation_id],
             )
             .expect("insert approval");
+    }
+
+    /// A dormant `prepared` draft with no approval, as left by an abandoned
+    /// prepare; a stale sweep may delete it.
+    fn seed_stale_draft(path: &Path, mutation_id: &str) {
+        let _ = MutationLedger::new(path.to_path_buf()).get("schema-seed");
+        let connection = open_private_wal(path, SynchronousMode::Full).expect("open fixture");
+        let action_json = serde_json::to_string(&voice_action()).expect("action json");
+        connection
+            .execute(
+                "INSERT INTO prepared_mutations (mutation_id, schema_version, account_user_id,
+                     action_json, payload_sha256, state, result_json, created_at)
+                 VALUES (?1, 1, 700, ?2, 'payload-sha', 'prepared', NULL, 1000)",
+                params![mutation_id, action_json],
+            )
+            .expect("insert stale draft");
     }
 
     fn approval_row(path: &Path, approval_id: &str) -> (String, Option<String>, Option<String>) {
@@ -917,6 +933,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("state.sqlite");
         seed_dormant_unknown(&path, "appr-a", "mut-a");
+        seed_stale_draft(&path, "draft-stale");
         let report = expire_stale(
             &path,
             &ExpireStaleOptions {
@@ -929,8 +946,12 @@ mod tests {
         assert_eq!(report.unknowns_no_effect.len(), 1);
         assert_eq!(report.unknowns_no_effect[0].approval_id, "appr-a");
         assert_eq!(report.unknowns_no_effect[0].mutation_id, "mut-a");
+        assert!(report.prepared_mutations_deleted.contains(&"draft-stale".to_string()));
         assert_eq!(report.counts_after.unknown_approvals, 1);
         assert_eq!(approval_row(&path, "appr-a").0, "outcome_unknown");
+        assert_eq!(mutation_state(&path, "mut-a"), "outcome_unknown");
+        assert_eq!(mutation_state(&path, "draft-stale"), "prepared");
+        assert!(!temp.path().join("archive").exists());
     }
 
     #[test]
@@ -972,6 +993,15 @@ mod tests {
             verified[0].get("approval_id").and_then(|value| value.as_str()),
             Some("appr-a")
         );
+        let connection = open_private_wal(&path, SynchronousMode::Full).expect("open");
+        let decided: Option<i64> = connection
+            .query_row(
+                "SELECT decided_at FROM mutation_approvals WHERE approval_id = 'appr-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("decided_at");
+        assert_eq!(decided, Some(1500));
     }
 
     #[test]
@@ -1034,5 +1064,59 @@ mod tests {
             "unexpected error: {err}"
         );
         assert_eq!(approval_row(&path, "appr-x").0, "outcome_unknown");
+    }
+
+    #[test]
+    fn rejects_non_dormant_rows_without_touching_them() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        seed_dormant_unknown(&path, "appr-d", "mut-d");
+        let connection = open_private_wal(&path, SynchronousMode::Full).expect("open");
+        connection
+            .execute(
+                "UPDATE mutation_approvals SET next_retry_at = 3000 WHERE approval_id = 'appr-d'",
+                [],
+            )
+            .expect("arm auto-retry");
+        drop(connection);
+        let archive = temp.path().join("archive.json");
+        let err = expire_stale(
+            &path,
+            &ExpireStaleOptions {
+                dry_run: false,
+                archive_path: Some(archive.clone()),
+                confirm_no_effect: vec!["appr-d".to_string()],
+                ..ExpireStaleOptions::default()
+            },
+        )
+        .expect_err("a row with an armed auto-retry must not be resolved");
+        assert!(
+            err.to_string().contains("does not match a dormant outcome_unknown approval"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(approval_row(&path, "appr-d").0, "outcome_unknown");
+        assert_eq!(mutation_state(&path, "mut-d"), "outcome_unknown");
+        assert!(!archive.exists());
+    }
+
+    #[test]
+    fn archive_failure_leaves_the_ledger_untouched() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        seed_dormant_unknown(&path, "appr-z", "mut-z");
+        let archive = temp.path().join("archive.json");
+        std::fs::write(&archive, "existing archive").expect("create existing archive");
+        expire_stale(
+            &path,
+            &ExpireStaleOptions {
+                dry_run: false,
+                archive_path: Some(archive),
+                confirm_no_effect: vec!["appr-z".to_string()],
+                ..ExpireStaleOptions::default()
+            },
+        )
+        .expect_err("the archive must be written before any ledger mutation");
+        assert_eq!(approval_row(&path, "appr-z").0, "outcome_unknown");
+        assert_eq!(mutation_state(&path, "mut-z"), "outcome_unknown");
     }
 }
