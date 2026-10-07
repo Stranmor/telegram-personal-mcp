@@ -190,7 +190,7 @@ async fn idle_hour_stays_within_reconcile_budget() -> anyhow::Result<()> {
                 .iter()
                 .filter(|event| {
                     **event >= *reference
-                        && event.duration_since(*reference) <= Duration::from_secs(3600)
+                        && event.saturating_sub(*reference) <= Duration::from_secs(3600)
                 })
                 .count()
         })
@@ -198,7 +198,7 @@ async fn idle_hour_stays_within_reconcile_budget() -> anyhow::Result<()> {
         .unwrap_or(0);
     let min_gap = events
         .windows(2)
-        .map(|pair| pair[1].duration_since(pair[0]))
+        .map(|pair| pair[1].saturating_sub(pair[0]))
         .min()
         .unwrap_or(Duration::from_secs(3600));
     println!(
