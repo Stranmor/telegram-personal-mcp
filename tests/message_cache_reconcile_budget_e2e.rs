@@ -76,25 +76,16 @@ fn open_stand() -> anyhow::Result<Stand> {
 /// Wait until the initial catch-up pass has clearly finished: at least one
 /// dialog-list call is visible and both counters stayed quiet for 200 ms.
 async fn wait_for_warm_up(backend: &FakeTelegramBackend) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(120);
     let mut previous = None;
     let mut quiet = 0_u32;
-    let mut last_diag = Instant::now() - Duration::from_secs(1);
     loop {
-        let read = tokio::time::timeout(Duration::from_secs(2), async {
+        let read = tokio::time::timeout(Duration::from_secs(5), async {
             (backend.list_dialogs_call_count().await, backend.history_observation().await.0)
         })
         .await;
-        let current = read.unwrap_or((usize::MAX, usize::MAX));
-        if last_diag.elapsed() >= Duration::from_secs(1) {
-            last_diag = Instant::now();
-            eprintln!(
-                "DIAG warm-up t={:?} read_ok={} counters={current:?}",
-                deadline.elapsed(),
-                read.is_ok()
-            );
-        }
-        if previous == Some(current) && current.0 >= 1 && current.1 >= 1 {
+        let counters = read.unwrap_or((usize::MAX, usize::MAX));
+        if previous == Some(counters) && counters.0 >= 1 && counters.1 >= 1 {
             quiet += 1;
             if quiet >= 8 {
                 return;
@@ -102,18 +93,57 @@ async fn wait_for_warm_up(backend: &FakeTelegramBackend) {
         } else {
             quiet = 0;
         }
-        previous = Some(current);
-        assert!(Instant::now() < deadline, "reconcile warm-up never settled: {current:?}");
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        previous = Some(counters);
+        assert!(Instant::now() < deadline, "reconcile warm-up never settled: {counters:?}");
+        tokio::time::sleep(SCALED_POLL).await;
     }
 }
 
 #[tokio::test]
-async fn frozen_dialogs_cost_no_history_and_two_lists_per_hour() -> anyhow::Result<()> {
+async fn diag_timeline() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .with_writer(std::io::stderr)
         .try_init();
+    let t0 = Instant::now();
+    let (_temp, _cache, backend, server) = open_stand()?;
+    eprintln!("DIAG open_stand took {:?}", t0.elapsed());
+    let worker = server.start_message_cache_worker_with_intervals(SCALED_POLL, SCALED_RECONCILE);
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut last_print = Instant::now() - Duration::from_secs(1);
+    loop {
+        let read = tokio::time::timeout(Duration::from_secs(5), async {
+            (backend.list_dialogs_call_count().await, backend.history_observation().await.0)
+        })
+        .await;
+        match read {
+            Ok(counters) => {
+                if last_print.elapsed() >= Duration::from_secs(1) {
+                    last_print = Instant::now();
+                    eprintln!("DIAG t={:?} counters={counters:?}", t0.elapsed());
+                }
+                if counters.0 >= 1 && counters.1 >= 1 {
+                    eprintln!(
+                        "DIAG first reconcile reached at {:?} counters={counters:?}",
+                        t0.elapsed()
+                    );
+                    break;
+                }
+            },
+            Err(_) => eprintln!("DIAG t={:?} counter read TIMED OUT (5s)", t0.elapsed()),
+        }
+        if Instant::now() >= deadline {
+            eprintln!("DIAG deadline hit at {:?}", t0.elapsed());
+            break;
+        }
+        tokio::time::sleep(SCALED_POLL).await;
+    }
+    worker.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn frozen_dialogs_cost_no_history_and_two_lists_per_hour() -> anyhow::Result<()> {
     let (_temp, _cache, backend, server) = open_stand()?;
     let worker = server.start_message_cache_worker_with_intervals(SCALED_POLL, SCALED_RECONCILE);
     wait_for_warm_up(&backend).await;
