@@ -128,9 +128,66 @@ pub struct OwnerGrantUse {
     pub reason: String,
 }
 
+/// @BotFather is never grantable in any form (owner 2026-10-07): an autonomous
+/// agent created and deleted two bots from the owner account on 2026-10-06 and
+/// Telegram anti-abuse then froze those bots and reset the owner's sessions.
+/// Every message to BotFather goes through the owner's approval card, including
+/// a grant file written directly by hand.
+const BOTFATHER_USERNAME: &str = "botfather";
+const BOTFATHER_USER_ID: &str = "93372553";
+
+/// Normalise a peer reference to a comparable identity: strip any scheme,
+/// `www.`, `t.me/`/`telegram.me/` prefix, leading `@` and surrounding slashes,
+/// repeating until stable, then lowercase. `@BotFather`,
+/// `https://telegram.me/BotFather/` and `botfather` all collapse to the same
+/// value, so this is the single authority both the grant and the MCP rely on.
 fn normalize_peer(value: &str) -> String {
-    let trimmed = value.trim().trim_start_matches("https://t.me/").trim_start_matches("t.me/");
-    trimmed.trim_start_matches('@').to_ascii_lowercase()
+    let mut current = value.trim().to_string();
+    loop {
+        let mut next = current.trim().to_string();
+        for prefix in ["https://", "http://", "www."] {
+            if let Some(stripped) = strip_prefix_ignore_case(&next, prefix) {
+                next = stripped.to_string();
+                break;
+            }
+        }
+        for prefix in ["telegram.me/", "t.me/"] {
+            if let Some(stripped) = strip_prefix_ignore_case(&next, prefix) {
+                next = stripped.to_string();
+                break;
+            }
+        }
+        next = next.trim_matches('/').trim_start_matches('@').trim().to_string();
+        if next == current {
+            return current.to_ascii_lowercase();
+        }
+        current = next;
+    }
+}
+
+fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &value[prefix.len()..])
+}
+
+/// `true` when a peer reference resolves to a denied identity: its normalised
+/// form is the BotFather username or user id, a punctuation-folded spelling of
+/// the username (`bot-father`, `bot_father`), or carries the BotFather user id
+/// among its digits. Denied peers can be neither a grant target nor a grant
+/// entry, so a grant can never cover BotFather.
+fn is_denied_peer(value: &str) -> bool {
+    let normalized = normalize_peer(value);
+    if normalized.is_empty() {
+        return false;
+    }
+    let folded: String = normalized.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let digits: String = normalized.chars().filter(|c| c.is_ascii_digit()).collect();
+    normalized == BOTFATHER_USERNAME
+        || normalized == BOTFATHER_USER_ID
+        || folded == BOTFATHER_USERNAME
+        || digits.contains(BOTFATHER_USER_ID)
 }
 
 impl OwnerGrant {
@@ -141,7 +198,11 @@ impl OwnerGrant {
     pub fn allows(&self, peers: &[&str]) -> bool {
         peers.iter().filter(|peer| !peer.trim().is_empty()).any(|peer| {
             let wanted = normalize_peer(peer);
-            self.allow_peers.iter().any(|allowed| normalize_peer(allowed) == wanted)
+            !is_denied_peer(&wanted)
+                && self.allow_peers.iter().any(|allowed| {
+                    let candidate = normalize_peer(allowed);
+                    !is_denied_peer(&candidate) && candidate == wanted
+                })
         })
     }
 }
@@ -155,6 +216,12 @@ pub fn consume_owner_grant(
 ) -> Option<OwnerGrantUse> {
     let raw = std::fs::read_to_string(path).ok()?;
     let mut grant: OwnerGrant = serde_json::from_str(&raw).ok()?;
+    // Belt and braces: a denied peer (BotFather) never consumes a grant, even
+    // if a hand-written grant lists it in `allow_peers`. This keeps the
+    // invariant local to the consumer instead of relying on the writer.
+    if peers.iter().any(|peer| is_denied_peer(peer)) {
+        return None;
+    }
     if !grant.is_live(now_unix) || !grant.allows(peers) {
         return None;
     }
@@ -6211,6 +6278,71 @@ impl ApprovalBot for FakeApprovalBot {
 mod tests {
     use super::*;
     use crate::domain::MutationExecutionOwner;
+
+    fn live_grant(allow_peers: &[&str]) -> OwnerGrant {
+        OwnerGrant {
+            granted_by: 432_567_587,
+            granted_at_unix: 1_000,
+            expires_at_unix: 10_000,
+            remaining_messages: 5,
+            allow_peers: allow_peers.iter().map(|peer| (*peer).to_string()).collect(),
+            reason: "owner-grant unit test".to_string(),
+        }
+    }
+
+    fn write_grant(path: &std::path::Path, grant: &OwnerGrant) {
+        std::fs::write(path, serde_json::to_vec_pretty(grant).expect("grant json"))
+            .expect("write grant");
+    }
+
+    #[test]
+    fn botfather_is_never_grantable_in_any_normalised_form() {
+        // Even a hand-written grant that lists BotFather covers none of its
+        // spellings, so the send and mutation paths keep the approval card.
+        let grant = live_grant(&["@BotFather", "93372553", "botfather"]);
+        for peer in [
+            "BotFather",
+            "@BotFather",
+            "@botfather",
+            "https://t.me/BotFather/",
+            "https://telegram.me/botfather",
+            "www.telegram.me/BotFather",
+            "bot-father",
+            "93372553",
+        ] {
+            assert!(!grant.allows(&[peer]), "{peer} must never be grantable");
+        }
+    }
+
+    #[test]
+    fn consume_owner_grant_refuses_botfather_written_into_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("owner-grant.json");
+        write_grant(&path, &live_grant(&["@BotFather"]));
+        // The send path passes chat_id, username and display_name of the same
+        // target; here every one of them is a BotFather spelling.
+        assert!(
+            consume_owner_grant(&path, &["93372553", "BotFather", "BotFather"], 5_000).is_none()
+        );
+        let grant: OwnerGrant =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("grant");
+        assert_eq!(
+            grant.remaining_messages, 5,
+            "a refused grant must not be consumed"
+        );
+    }
+
+    #[test]
+    fn consume_owner_grant_matches_a_peer_by_identity_not_by_containment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("owner-grant.json");
+        write_grant(&path, &live_grant(&["@alex", "101"]));
+        assert!(consume_owner_grant(&path, &["101", "alex", "Alex"], 5_000).is_some());
+        // A peer that merely contains an allowed name is a different identity
+        // and must not be covered.
+        write_grant(&path, &live_grant(&["alex"]));
+        assert!(consume_owner_grant(&path, &["@alexandra"], 5_000).is_none());
+    }
 
     fn sample_send_approval(state: SendApprovalState) -> SendApproval {
         SendApproval {
