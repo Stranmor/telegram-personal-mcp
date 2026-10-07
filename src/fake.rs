@@ -3804,6 +3804,17 @@ impl FakeTelegramBackend {
         state.contacts.push(contact);
     }
 
+    /// Add a dialog to the fixture so a test can resolve an extra peer by
+    /// username or ref (for example `@BotFather`, which the owner grant must
+    /// never cover). A user dialog also needs a matching contact for
+    /// `get_user_info`; add it separately with `add_fixture_contact`.
+    #[doc(hidden)]
+    pub async fn add_fixture_dialog(&self, dialog: DialogSummary) {
+        let mut state = self.state.lock().await;
+        state.dialogs.retain(|existing| existing.chat_id != dialog.chat_id);
+        state.dialogs.push(dialog);
+    }
+
     #[doc(hidden)]
     pub async fn set_fixture_chat_member(
         &self,

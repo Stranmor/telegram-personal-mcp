@@ -36,6 +36,10 @@ and releases use [Semantic Versioning](https://semver.org/).
   `TELEGRAM_MCP_MESSAGE_CACHE_POLL_INTERVAL_SECS` (default unchanged: 2 s).
 
 ### Fixed
+- The owner grant can no longer skip the approval card for `@BotFather`
+  (id `93372553`) in any normalised form — including a grant file written
+  directly by hand — and a mutation grant is matched against the exact target
+  peer of the action instead of any peer name that merely occurs in its JSON.
 - Completed a manual approval-ledger cleanup on 2026-09-19: three dormant
   `outcome_unknown` approvals were bound to their independently verified
   Telegram receipts (now `applied`), and 33 prepared mutations plus 17

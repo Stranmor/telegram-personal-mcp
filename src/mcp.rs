@@ -38394,35 +38394,16 @@ mod tests {
     }
 }
 
-/// The peer a mutation addresses, read from its serialized action. Mutations
-/// carry their target under different keys per kind, so the grant check looks
-/// for the known peer-shaped fields instead of matching every variant.
-/// Peer candidates for a mutation: the first peer-shaped field found in the
-/// serialized action, plus every allowed grant peer that literally occurs in
-/// that JSON (a mutation may address a peer through a nested or differently
-/// named field; containment is a safe superset because the grant itself is the
-/// owner's explicit authorization).
+/// Peer candidates for a mutation: exactly the target peer read from the
+/// serialized action (the first peer-shaped field found depth-first). An
+/// earlier revision also admitted every allowed grant peer that literally
+/// occurred anywhere in the action JSON; containment is not identity — a grant
+/// for one peer then authorized a mutation aimed at an unrelated chat (a peer
+/// name appearing in a button label or a file name was enough), so the target
+/// is now the only candidate and it must match `allow_peers` by normalized
+/// identity.
 fn mutation_grant_peers(action: &MutationAction) -> Vec<String> {
-    let mut peers: Vec<String> = Vec::new();
-    if let Some(peer) = mutation_target_peer(action) {
-        peers.push(peer);
-    }
-    if let Ok(serialized) = serde_json::to_string(action) {
-        if let Ok(raw) = std::fs::read_to_string(
-            std::env::var("TELEGRAM_MCP_OWNER_GRANT_FILE").unwrap_or_default(),
-        ) {
-            if let Ok(grant) = serde_json::from_str::<crate::approval::OwnerGrant>(&raw) {
-                for allowed in grant.allow_peers {
-                    let needle = allowed.trim().trim_start_matches('@').to_string();
-                    if !needle.is_empty() && serialized.contains(&needle) && !peers.contains(&allowed)
-                    {
-                        peers.push(allowed);
-                    }
-                }
-            }
-        }
-    }
-    peers
+    mutation_target_peer(action).into_iter().collect()
 }
 
 fn mutation_target_peer(action: &MutationAction) -> Option<String> {

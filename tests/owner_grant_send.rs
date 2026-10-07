@@ -17,8 +17,9 @@ use telegram_personal_mcp::{
     PreparedSendState, SendApprovalState, SendLedger,
 };
 use telegram_personal_mcp::domain::{
-    PreparedNonTelegramSource, PreparedOutboundSource, PreparedSendTarget,
+    ContactSummary, PreparedNonTelegramSource, PreparedOutboundSource, PreparedSendTarget,
 };
+use telegram_personal_mcp::telegram::DialogSummary;
 
 fn grant_policy(grant_path: std::path::PathBuf) -> ApprovalPolicy {
     ApprovalPolicy {
@@ -448,4 +449,245 @@ fn approval_transition_refusal_names_states() {
         !text.contains("Conversion error"),
         "must not look like a type conversion: {text}"
     );
+}
+
+fn write_grant_with_peers(
+    path: &std::path::Path,
+    remaining: u32,
+    peers: &[&str],
+) -> anyhow::Result<()> {
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
+    let grant = serde_json::json!({
+        "granted_by": 700,
+        "granted_at_unix": now,
+        "expires_at_unix": now + 3_600,
+        "remaining_messages": remaining,
+        "allow_peers": peers,
+        "reason": "owner-grant contract test",
+    });
+    std::fs::write(path, serde_json::to_vec_pretty(&grant)?)?;
+    Ok(())
+}
+
+fn botfather_dialog() -> DialogSummary {
+    DialogSummary {
+        chat_id: 93_372_553,
+        canonical_chat_id: "93372553".to_string(),
+        chat_ref: "@BotFather".to_string(),
+        chat_kind: "user".to_string(),
+        title: "BotFather".to_string(),
+        username: Some("BotFather".to_string()),
+        last_message_id: Some(1),
+        last_message_text: Some("/start".to_string()),
+        last_message_outgoing: Some(false),
+        last_message_date: Some(1_700_000_001),
+        pinned: false,
+        unread_mark: false,
+        unread_count: 0,
+        archived: false,
+        folder_id: Some(0),
+    }
+}
+
+fn botfather_contact() -> ContactSummary {
+    ContactSummary {
+        user_id: 93_372_553,
+        first_name: "BotFather".to_string(),
+        last_name: None,
+        display_name: "BotFather".to_string(),
+        username: Some("BotFather".to_string()),
+        phone: None,
+        is_contact: false,
+        mutual_contact: false,
+        bot: true,
+        verified: true,
+        premium: false,
+        scam: false,
+        restricted: false,
+    }
+}
+
+async fn start_grant_server(
+    backend: Arc<FakeTelegramBackend>,
+    bot: Arc<FakeApprovalBot>,
+    temp: &tempfile::TempDir,
+    grant_path: std::path::PathBuf,
+) -> anyhow::Result<(
+    rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+)> {
+    let server = McpServer::with_approval(
+        backend,
+        McpServerSettings {
+            attachment_cache_dir: temp.path().join("attachments"),
+            max_download_bytes: 1024 * 1024,
+            max_upload_bytes: 1024 * 1024,
+            state_db_path: temp.path().join("state.sqlite"),
+        },
+        grant_policy(grant_path),
+        bot,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = ().serve(client_transport).await?;
+    Ok((client, server_task))
+}
+
+/// A grant that names @BotFather — even written directly into the file — must
+/// never let a send reach BotFather without the owner's approval card.
+#[tokio::test]
+async fn owner_grant_never_covers_botfather() -> anyhow::Result<()> {
+    let backend = Arc::new(FakeTelegramBackend::fixture());
+    backend.add_fixture_dialog(botfather_dialog()).await;
+    backend.add_fixture_contact(botfather_contact()).await;
+    let bot = Arc::new(FakeApprovalBot::default());
+    let temp = tempfile::tempdir()?;
+    let grant_path = temp.path().join("grant.json");
+    write_grant_with_peers(&grant_path, 10, &["@BotFather", "93372553", "botfather"])?;
+    let (client, server_task) =
+        start_grant_server(backend.clone(), bot.clone(), &temp, grant_path.clone()).await?;
+
+    let prepared = client
+        .call_tool(
+            CallToolRequestParams::new("prepare_message").with_arguments(
+                json!({
+                    "chat_id": "@BotFather",
+                    "text": "Owner-grant contract: BotFather stays on the card",
+                    "source": { "kind": "self_originated" },
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(prepared.is_error, Some(false));
+    let prepared = prepared.structured_content.expect("prepared send");
+    let draft_id = prepared
+        .pointer("/data/draft_id")
+        .and_then(serde_json::Value::as_str)
+        .expect("draft id")
+        .to_string();
+    let payload_sha256 = prepared
+        .pointer("/data/payload_sha256")
+        .and_then(serde_json::Value::as_str)
+        .expect("payload hash")
+        .to_string();
+
+    let requested = client
+        .call_tool(
+            CallToolRequestParams::new("request_send_approval").with_arguments(
+                json!({ "draft_id": draft_id, "approved_payload_sha256": payload_sha256 })
+                    .as_object()
+                    .expect("object")
+                    .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(requested.is_error, Some(false));
+    let requested = requested.structured_content.expect("send approval");
+    let state = requested
+        .pointer("/data/state")
+        .and_then(serde_json::Value::as_str)
+        .expect("state");
+    assert_ne!(state, "sent", "a BotFather send must never be auto-sent");
+    assert_eq!(state, "pending", "the approval card is the only path");
+    assert_eq!(backend.sent_messages().await.len(), 0, "nothing reached Telegram");
+    assert_eq!(bot.sent_cards().await.len(), 1, "the owner got the card");
+    assert_eq!(grant_remaining(&grant_path)?, 10, "a refused grant is not consumed");
+
+    client.cancel().await?;
+    server_task.await??;
+    Ok(())
+}
+
+/// A mutation grant is checked against the exact target peer: a grant for
+/// another chat, or one whose name merely occurs inside the action JSON (the
+/// button label "Approve"), must fall back to a card, while a grant naming the
+/// target chat id applies.
+#[tokio::test]
+async fn owner_grant_mutation_matches_the_target_peer_not_a_substring() -> anyhow::Result<()> {
+    // press_button on the callback button of message 11 in @alex (chat 101).
+    for (peers, expect_card) in
+        [(vec!["-202"], true), (vec!["Approve"], true), (vec!["101"], false)]
+    {
+        let backend = Arc::new(FakeTelegramBackend::fixture());
+        let bot = Arc::new(FakeApprovalBot::default());
+        let temp = tempfile::tempdir()?;
+        let grant_path = temp.path().join("grant.json");
+        write_grant_with_peers(&grant_path, 10, &peers)?;
+        let (client, server_task) =
+            start_grant_server(backend.clone(), bot.clone(), &temp, grant_path.clone()).await?;
+
+        let prepared = client
+            .call_tool(
+                CallToolRequestParams::new("press_button").with_arguments(
+                    json!({ "chatId": "@alex", "messageId": 11, "row": 0, "column": 0 })
+                        .as_object()
+                        .expect("object")
+                        .clone(),
+                ),
+            )
+            .await?;
+        assert_eq!(prepared.is_error, Some(false));
+        let prepared = prepared.structured_content.expect("prepared mutation");
+        let mutation_id = prepared
+            .pointer("/data/mutation_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("mutation id")
+            .to_string();
+        let payload_sha256 = prepared
+            .pointer("/data/payload_sha256")
+            .and_then(serde_json::Value::as_str)
+            .expect("payload hash")
+            .to_string();
+
+        let requested = client
+            .call_tool(
+                CallToolRequestParams::new("request_mutation_approval").with_arguments(
+                    json!({ "mutation_id": mutation_id, "approved_payload_sha256": payload_sha256 })
+                        .as_object()
+                        .expect("object")
+                        .clone(),
+                ),
+            )
+            .await?;
+        assert_eq!(requested.is_error, Some(false));
+        let requested = requested.structured_content.expect("mutation approval");
+        let state = requested
+            .pointer("/data/state")
+            .and_then(serde_json::Value::as_str)
+            .expect("state");
+        if expect_card {
+            assert_eq!(state, "pending", "grant {peers:?} must not authorize the mutation");
+            assert_eq!(
+                bot.sent_mutation_cards().await.len(),
+                1,
+                "the owner got the card for {peers:?}"
+            );
+            assert_eq!(
+                backend.pressed_callback_buttons().await.len(),
+                0,
+                "no button was pressed for {peers:?}"
+            );
+            assert_eq!(grant_remaining(&grant_path)?, 10, "a refused grant is not consumed");
+        } else {
+            assert_eq!(state, "applied", "an exact target grant applies");
+            assert_eq!(bot.sent_mutation_cards().await.len(), 0, "no card when covered");
+            assert_eq!(
+                backend.pressed_callback_buttons().await.len(),
+                1,
+                "the button was pressed once"
+            );
+            assert_eq!(grant_remaining(&grant_path)?, 9, "the grant was consumed once");
+        }
+
+        client.cancel().await?;
+        server_task.await??;
+    }
+    Ok(())
 }
