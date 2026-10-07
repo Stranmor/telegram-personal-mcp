@@ -14,9 +14,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use telegram_personal_mcp::{
     ApprovalBot, ApprovalPolicy, BotApiApprovalBot, Config, DEFAULT_MAX_DOWNLOAD_BYTES,
-    DEFAULT_MAX_UPLOAD_BYTES, FakeTelegramBackend, FanoutApprovalBot, LoginCodeOutcome,
-    LoginRequestOutcome, MAX_MESSAGE_CACHE_AGE_DAYS, McpServer, McpServerSettings, TelegramBackend,
-    TelegramClient,
+    DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_MESSAGE_CACHE_POLL_INTERVAL,
+    DEFAULT_MESSAGE_CACHE_RECONCILE_INTERVAL, FakeTelegramBackend, FanoutApprovalBot,
+    LoginCodeOutcome, LoginRequestOutcome, MAX_MESSAGE_CACHE_AGE_DAYS, McpServer, McpServerSettings,
+    TelegramBackend, TelegramClient,
     daemon::{
         DaemonConfigIdentity, DaemonPaths, connect_existing_matching, install_proxy_signal_ignores,
         prepare_mcp_daemon, proxy_stdio, run_mcp_daemon, wait_for_matching_socket,
@@ -61,6 +62,24 @@ struct Args {
         value_parser = parse_message_cache_max_age_days
     )]
     message_cache_max_age_days: Option<u32>,
+    /// Cache-worker poll period between update-difference checks, in seconds.
+    #[arg(
+        long,
+        env = "TELEGRAM_MCP_MESSAGE_CACHE_POLL_INTERVAL_SECS",
+        default_value_t = DEFAULT_MESSAGE_CACHE_POLL_INTERVAL.as_secs(),
+        value_parser = clap::value_parser!(u64).range(1..=86_400)
+    )]
+    message_cache_poll_interval_secs: u64,
+    /// Dialog-reconciliation period, in seconds; the default is one pass per
+    /// 30 minutes so an idle account makes at most two dialog-list calls per
+    /// hour, each limited to dialogs whose top message advanced.
+    #[arg(
+        long,
+        env = "TELEGRAM_MCP_MESSAGE_CACHE_RECONCILE_INTERVAL_SECS",
+        default_value_t = DEFAULT_MESSAGE_CACHE_RECONCILE_INTERVAL.as_secs(),
+        value_parser = clap::value_parser!(u64).range(1..=86_400)
+    )]
+    message_cache_reconcile_interval_secs: u64,
     #[arg(long, env = "TELEGRAM_API_ID", global = true)]
     api_id: Option<i32>,
     /// Exact compatible daemon executable used by stdio proxy mode.
@@ -250,7 +269,10 @@ async fn daemon(args: &Args) -> Result<()> {
     let approval_worker = server
         .start_approval_worker()
         .context("failed to start the Telegram approval callback worker")?;
-    let cache_worker = server.start_message_cache_worker();
+    let cache_worker = server.start_message_cache_worker_with_intervals(
+        Duration::from_secs(args.message_cache_poll_interval_secs),
+        Duration::from_secs(args.message_cache_reconcile_interval_secs),
+    );
     let result = run_mcp_daemon(server, prepared).await.map_err(anyhow::Error::new);
     cache_worker.shutdown().await;
     if let Some(worker) = approval_worker {
@@ -404,6 +426,16 @@ fn daemon_config_identity(args: &Args, executable: &Path) -> Result<DaemonConfig
         &mut hasher,
         "message_cache_max_age_days",
         max_age_days.as_deref().map(str::as_bytes),
+    );
+    hash_daemon_identity_field(
+        &mut hasher,
+        "message_cache_poll_interval_secs",
+        Some(args.message_cache_poll_interval_secs.to_string().as_bytes()),
+    );
+    hash_daemon_identity_field(
+        &mut hasher,
+        "message_cache_reconcile_interval_secs",
+        Some(args.message_cache_reconcile_interval_secs.to_string().as_bytes()),
     );
     let api_id = args.api_id.map(|value| value.to_string());
     hash_daemon_identity_field(&mut hasher, "api_id", api_id.as_deref().map(str::as_bytes));

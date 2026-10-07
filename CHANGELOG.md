@@ -25,6 +25,16 @@ and releases use [Semantic Versioning](https://semver.org/).
   without active approvals. This is a manual state-maintenance operation; it
   never sends Telegram messages or creates approval cards.
 
+### Changed
+- Message-cache reconciliation no longer re-fetches every visible dialog every
+  minute. The reconcile period defaults to 30 minutes
+  (`TELEGRAM_MCP_MESSAGE_CACHE_RECONCILE_INTERVAL_SECS`), and each pass issues
+  a per-chat history request only for dialogs whose top message advanced past
+  the cached frontier. An idle account now costs at most two `list_dialogs`
+  calls and zero history requests per hour instead of up to fifty history
+  requests per minute. The update-difference poll period is configurable with
+  `TELEGRAM_MCP_MESSAGE_CACHE_POLL_INTERVAL_SECS` (default unchanged: 2 s).
+
 ### Fixed
 - Completed a manual approval-ledger cleanup on 2026-09-19: three dormant
   `outcome_unknown` approvals were bound to their independently verified

@@ -134,8 +134,11 @@ const MAX_EXPORT_CACHED_MESSAGES_LIMIT: usize = 10_000;
 const DEFAULT_UPDATES_PTS_LIMIT: usize = 100;
 const DEFAULT_UPDATES_PTS_TOTAL_LIMIT: usize = 1_000;
 const MAX_UPDATES_LIMIT: usize = 1_000;
-const DEFAULT_MESSAGE_CACHE_POLL_INTERVAL: Duration = Duration::from_secs(2);
-const DEFAULT_MESSAGE_CACHE_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
+pub const DEFAULT_MESSAGE_CACHE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Dialog-level reconciliation is a catch-up net, not a poller: an idle
+/// account reconciles at most twice per hour, and only dialogs whose visible
+/// top message advanced past the cached frontier pay a per-chat history call.
+pub const DEFAULT_MESSAGE_CACHE_RECONCILE_INTERVAL: Duration = Duration::from_secs(1800);
 const MESSAGE_CACHE_RETENTION_CHECK_INTERVAL: i64 = 24 * 60 * 60;
 const MESSAGE_CACHE_RECONCILE_MAX_CHATS: usize = 50;
 const MESSAGE_CACHE_RECONCILE_LIMIT: usize = 200;
@@ -30933,7 +30936,35 @@ impl McpServer {
             .await
             .map_err(ToolFailure::from)?;
         let mut failures = 0_usize;
+        let mut skipped = 0_usize;
         for dialog in &dialogs {
+            // When the dialog's visible top message has not advanced past the
+            // cached frontier, the per-chat history request could only return
+            // nothing new. Skipping it keeps an idle account at one
+            // dialog-list call per reconciliation pass.
+            let cache_chat_id = dialog.canonical_chat_id.clone();
+            let (current_generation, _, frontier_message_id, checkpoint) = self
+                .run_cache(move |cache| cache.dialog_sync_state(account_user_id, &cache_chat_id))
+                .await?;
+            if current_generation != expected_generation {
+                return Err(cache_failure(MessageCacheError::StaleGeneration {
+                    expected: expected_generation,
+                    current: current_generation,
+                }));
+            }
+            let cached_frontier = checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.frontier_message_id)
+                .into_iter()
+                .chain(frontier_message_id)
+                .max();
+            let top_advanced = dialog
+                .last_message_id
+                .is_some_and(|top| cached_frontier.is_none_or(|frontier| top > frontier));
+            if !top_advanced {
+                skipped = skipped.saturating_add(1);
+                continue;
+            }
             let metadata = dialog_metadata_from_summary(dialog, now_unix());
             if let Err(error) = self
                 .sync_one_cache_chat(
@@ -30954,6 +30985,14 @@ impl McpServer {
                 }
                 failures = failures.saturating_add(1);
             }
+        }
+        if skipped > 0 {
+            info!(
+                dialogs = dialogs.len(),
+                skipped,
+                failures,
+                "message-cache reconciliation skipped unchanged dialogs"
+            );
         }
         if !dialogs.is_empty() && failures == dialogs.len() {
             return Err(ToolFailure::new(

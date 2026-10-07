@@ -526,6 +526,8 @@ For authorization failures and connection cleanup, see [session recovery](docs/s
 | `TELEGRAM_MCP_STATE_DB` | `--state-db-path` | XDG state path described below |
 | `TELEGRAM_MCP_MESSAGE_CACHE_DB` | `--message-cache-db-path` | `message-cache.sqlite` beside the state database |
 | `TELEGRAM_MCP_MESSAGE_CACHE_MAX_AGE_DAYS` | `--message-cache-max-age-days` | Optional whole-day UTC retention for cached message history; allowed `1..=36500`, unset keeps history until explicit clearing |
+| `TELEGRAM_MCP_MESSAGE_CACHE_POLL_INTERVAL_SECS` | `--message-cache-poll-interval-secs` | Cache-worker poll period between update-difference checks; default `2`, allowed 1–86400 seconds |
+| `TELEGRAM_MCP_MESSAGE_CACHE_RECONCILE_INTERVAL_SECS` | `--message-cache-reconcile-interval-secs` | Dialog-reconciliation period; default `1800` (one pass per 30 minutes), allowed 1–86400 seconds. Each pass re-reads history only for dialogs whose top message advanced past the cached frontier |
 | `TELEGRAM_MCP_DAEMON_DIR` | — (environment only) | Private daemon socket/lock/log directory; resolution order described below |
 | `TELEGRAM_MCP_APPROVAL_BOT_TOKEN` | — (environment only) | Dedicated approval bot token; enables button approval together with the two IDs below |
 | `TELEGRAM_MCP_APPROVAL_CHAT_ID` | — | Exact configured bot chat that receives approval cards |
@@ -606,6 +608,14 @@ history, reconciliation, search, or live-update ingestion cannot reinsert
 expired history. Affected dialog checkpoints become partial; dialogs, provider
 deletion tombstones, update cursors, and the incoming-event journal are retained
 independently.
+
+Dialog reconciliation is deliberately sparse: by default the daemon reconciles
+once per 30 minutes (`TELEGRAM_MCP_MESSAGE_CACHE_RECONCILE_INTERVAL_SECS`),
+issues a single dialog-list call per pass, and fetches per-chat history only for
+dialogs whose visible top message advanced past the cached frontier, so an idle
+account makes at most two dialog-list calls and no history requests per hour.
+`TELEGRAM_MCP_MESSAGE_CACHE_POLL_INTERVAL_SECS` controls the update-difference
+poll period between reconciliations (default 2 seconds).
 
 The daemon directory defaults to:
 

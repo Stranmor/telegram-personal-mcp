@@ -210,6 +210,7 @@ struct FakeState {
     messages: HashMap<i64, Vec<MessageSummary>>,
     history_calls: usize,
     history_rows_returned: usize,
+    list_dialogs_calls: usize,
     quick_reply_shortcuts: Vec<QuickReplyShortcutSummary>,
     quick_reply_messages: HashMap<i32, Vec<QuickReplyStoredMessageSummary>>,
     group_calls: HashMap<i64, (GroupCallInfoSummary, Vec<GroupCallParticipantSummary>)>,
@@ -2590,6 +2591,7 @@ impl FakeTelegramBackend {
                 messages,
                 history_calls: 0,
                 history_rows_returned: 0,
+                list_dialogs_calls: 0,
                 quick_reply_shortcuts: fixture_quick_reply_shortcuts(),
                 quick_reply_messages: fixture_quick_reply_messages(),
                 group_calls: fixture_group_calls(),
@@ -3054,6 +3056,50 @@ impl FakeTelegramBackend {
     pub async fn history_observation(&self) -> (usize, usize) {
         let state = self.state.lock().await;
         (state.history_calls, state.history_rows_returned)
+    }
+
+    #[doc(hidden)]
+    pub async fn list_dialogs_call_count(&self) -> usize {
+        self.state.lock().await.list_dialogs_calls
+    }
+
+    /// Append a synthetic incoming message to one fixture dialog and advance
+    /// its visible top message, mirroring what Telegram reports after a new
+    /// post arrives.
+    #[doc(hidden)]
+    pub async fn push_fixture_message(&self, chat_id: i64, text: &str) -> Option<i32> {
+        let mut state = self.state.lock().await;
+        if !state.dialogs.iter().any(|dialog| dialog.chat_id == chat_id) {
+            return None;
+        }
+        let messages = state.messages.entry(chat_id).or_default();
+        let next_message_id =
+            messages.iter().map(|message| message.message_id).max().unwrap_or(0) + 1;
+        let next_date = messages.iter().map(|message| message.date).max().unwrap_or(0) + 1;
+        messages.push(MessageSummary {
+            message_id: next_message_id,
+            chat_ref: Some(chat_id.to_string()),
+            sender_ref: None,
+            outgoing: false,
+            pinned: false,
+            silent: false,
+            noforwards: false,
+            text: Some(text.to_string()),
+            date: next_date,
+            edit_date: None,
+            reply_to_message_id: None,
+            views: None,
+            forwards: None,
+            reply_count: None,
+            media_type: None,
+            forward_origin: None,
+        });
+        if let Some(dialog) = state.dialogs.iter_mut().find(|dialog| dialog.chat_id == chat_id) {
+            dialog.last_message_id = Some(next_message_id);
+            dialog.last_message_text = Some(text.to_string());
+            dialog.last_message_date = Some(next_date);
+        }
+        Some(next_message_id)
     }
 
     #[doc(hidden)]
@@ -4212,7 +4258,8 @@ impl TelegramBackend for FakeTelegramBackend {
         _session_path: Option<PathBuf>,
         limit: usize,
     ) -> Result<Vec<DialogSummary>, TelegramError> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
+        state.list_dialogs_calls = state.list_dialogs_calls.saturating_add(1);
         Ok(state.dialogs.iter().take(limit).cloned().collect())
     }
 
