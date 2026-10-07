@@ -79,11 +79,21 @@ async fn wait_for_warm_up(backend: &FakeTelegramBackend) {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut previous = None;
     let mut quiet = 0_u32;
+    let mut last_diag = Instant::now() - Duration::from_secs(1);
     loop {
-        let current = (
-            backend.list_dialogs_call_count().await,
-            backend.history_observation().await.0,
-        );
+        let read = tokio::time::timeout(Duration::from_secs(2), async {
+            (backend.list_dialogs_call_count().await, backend.history_observation().await.0)
+        })
+        .await;
+        let current = read.unwrap_or((usize::MAX, usize::MAX));
+        if last_diag.elapsed() >= Duration::from_secs(1) {
+            last_diag = Instant::now();
+            eprintln!(
+                "DIAG warm-up t={:?} read_ok={} counters={current:?}",
+                deadline.elapsed(),
+                read.is_ok()
+            );
+        }
         if previous == Some(current) && current.0 >= 1 && current.1 >= 1 {
             quiet += 1;
             if quiet >= 8 {
@@ -100,6 +110,10 @@ async fn wait_for_warm_up(backend: &FakeTelegramBackend) {
 
 #[tokio::test]
 async fn frozen_dialogs_cost_no_history_and_two_lists_per_hour() -> anyhow::Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(std::io::stderr)
+        .try_init();
     let (_temp, _cache, backend, server) = open_stand()?;
     let worker = server.start_message_cache_worker_with_intervals(SCALED_POLL, SCALED_RECONCILE);
     wait_for_warm_up(&backend).await;
