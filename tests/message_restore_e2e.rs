@@ -141,6 +141,7 @@ async fn deleted_media_restore_preserves_content_and_requires_sender_change_opt_
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": prepared_delete
                         .pointer("/data/mutation_id")
                         .and_then(Value::as_str)
@@ -213,6 +214,7 @@ async fn deleted_media_restore_preserves_content_and_requires_sender_change_opt_
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": prepared_restore
                         .pointer("/data/mutation_id")
                         .and_then(Value::as_str)

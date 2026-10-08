@@ -179,6 +179,7 @@ async fn mixed_album_is_grouped_topic_bound_and_recovered_without_duplicates() -
     let requested = client
         .call_tool(CallToolRequestParams::new("request_mutation_approval").with_arguments(
             json!({
+                "purpose": "тест: подготовка мутации к подтверждению",
                 "mutation_id": prepared.pointer("/data/mutation_id").and_then(Value::as_str).unwrap(),
                 "approved_payload_sha256": prepared.pointer("/data/payload_sha256").and_then(Value::as_str).unwrap()
             }).as_object().unwrap().clone(),
@@ -289,6 +290,7 @@ async fn mixed_album_is_grouped_topic_bound_and_recovered_without_duplicates() -
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": prepared_delete
                         .pointer("/data/mutation_id")
                         .and_then(Value::as_str)
@@ -343,6 +345,7 @@ async fn mixed_album_is_grouped_topic_bound_and_recovered_without_duplicates() -
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": prepared_restore
                         .pointer("/data/mutation_id")
                         .and_then(Value::as_str)
@@ -427,6 +430,7 @@ async fn mixed_album_is_grouped_topic_bound_and_recovered_without_duplicates() -
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": prepared_restore_again
                         .pointer("/data/mutation_id")
                         .and_then(Value::as_str)

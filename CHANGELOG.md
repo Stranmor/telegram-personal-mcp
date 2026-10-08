@@ -26,6 +26,15 @@ and releases use [Semantic Versioning](https://semver.org/).
   never sends Telegram messages or creates approval cards.
 
 ### Changed
+- Mutation approval cards now speak in human terms: the card shows the resolved
+  chat name and @username (with an honest `название недоступно` fallback when
+  Telegram does not answer the resolution), a required `Зачем: …` line taken
+  from the initiator's new `purpose` argument, the decision deadline as
+  `Действует до: 09.10 13:28 МСК` instead of a raw Unix value, and one line per
+  decision button explaining exactly what the tap will do. SHA-256, Mutation
+  and Approval identifiers stay in the trailing technical block, and
+  `request_mutation_approval` now rejects an empty `purpose`. Scheduled-send,
+  file and story cards carry the same purpose and deadline lines.
 - Message-cache reconciliation no longer re-fetches every visible dialog every
   minute. The reconcile period defaults to 30 minutes
   (`TELEGRAM_MCP_MESSAGE_CACHE_RECONCILE_INTERVAL_SECS`), and each pass issues

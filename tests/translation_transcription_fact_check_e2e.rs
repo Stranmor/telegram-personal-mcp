@@ -57,6 +57,7 @@ macro_rules! request_mutation {
             .call_tool(
                 CallToolRequestParams::new("request_mutation_approval").with_arguments(
                     json!({
+                        "purpose": "тест: подготовка мутации к подтверждению",
                         "mutation_id": mutation_id,
                         "approved_payload_sha256": payload_sha256
                     })
@@ -278,6 +279,7 @@ async fn translation_transcription_and_fact_checks_are_approval_bound_and_recove
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": transcription_mutation_id,
                     "approved_payload_sha256": transcription_payload_sha256
                 })

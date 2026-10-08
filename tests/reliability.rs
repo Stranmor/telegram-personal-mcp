@@ -333,6 +333,7 @@ async fn file_approval_recovers_after_acceptance_without_duplicate_upload_messag
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": mutation_id,
                     "approved_payload_sha256": payload_sha256
                 })

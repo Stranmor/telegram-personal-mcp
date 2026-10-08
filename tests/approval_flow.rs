@@ -264,6 +264,7 @@ async fn scheduled_approval_expiry_is_capped_to_the_delivery_time() -> anyhow::R
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": prepared
                         .structured_content
                         .as_ref()
@@ -828,6 +829,7 @@ async fn mutation_buttons_apply_once_and_cancel_without_side_effects() -> anyhow
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": mutation_id,
                     "approved_payload_sha256": payload_sha256
                 })
@@ -927,6 +929,7 @@ async fn mutation_buttons_apply_once_and_cancel_without_side_effects() -> anyhow
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": delete_mutation_id,
                     "approved_payload_sha256": delete_hash
                 })
@@ -994,6 +997,7 @@ async fn mutation_buttons_apply_once_and_cancel_without_side_effects() -> anyhow
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": unpin_mutation_id,
                     "approved_payload_sha256": unpin_hash
                 })
@@ -1076,6 +1080,7 @@ async fn mutation_buttons_apply_once_and_cancel_without_side_effects() -> anyhow
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": reaction_mutation_id,
                     "approved_payload_sha256": reaction_payload_sha256
                 })
@@ -1155,6 +1160,7 @@ async fn mutation_buttons_apply_once_and_cancel_without_side_effects() -> anyhow
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": removal_mutation_id,
                     "approved_payload_sha256": removal_payload_sha256
                 })
@@ -1220,6 +1226,7 @@ async fn mutation_buttons_apply_once_and_cancel_without_side_effects() -> anyhow
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": draft_mutation_id,
                     "approved_payload_sha256": draft_payload_sha256
                 })
@@ -1280,6 +1287,7 @@ async fn mutation_buttons_apply_once_and_cancel_without_side_effects() -> anyhow
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": clear_mutation_id,
                     "approved_payload_sha256": clear_payload_sha256
                 })
@@ -1341,6 +1349,7 @@ async fn mutation_buttons_apply_once_and_cancel_without_side_effects() -> anyhow
                 .call_tool(
                     CallToolRequestParams::new("request_mutation_approval").with_arguments(
                         json!({
+                            "purpose": "тест: подготовка мутации к подтверждению",
                             "mutation_id": mutation_id,
                             "approved_payload_sha256": payload_sha256
                         })
@@ -1817,6 +1826,7 @@ async fn mutation_buttons_apply_once_and_cancel_without_side_effects() -> anyhow
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": forward_mutation_id,
                     "approved_payload_sha256": forward_payload_sha256
                 })
@@ -1942,6 +1952,7 @@ async fn mutation_buttons_apply_once_and_cancel_without_side_effects() -> anyhow
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": file_mutation_id,
                     "approved_payload_sha256": file_payload_sha256
                 })
@@ -2041,6 +2052,7 @@ async fn mutation_buttons_apply_once_and_cancel_without_side_effects() -> anyhow
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": scheduled_file_mutation_id,
                     "approved_payload_sha256": scheduled_file_payload_sha256
                 })
@@ -2171,6 +2183,7 @@ async fn changed_message_snapshot_blocks_an_approved_edit() -> anyhow::Result<()
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": prepared
                         .structured_content
                         .as_ref()

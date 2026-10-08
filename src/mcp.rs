@@ -13,7 +13,7 @@
 
 use crate::approval::{
     ApprovalAction, ApprovalBot, ApprovalCard, ApprovalDecision, ApprovalKind, ApprovalPolicy,
-    ApprovalWorkerLease, CardMedia, MutationApprovalCard,
+    ApprovalWorkerLease, CardMedia, MutationApprovalCard, MutationChatLabel,
 };
 use crate::backend::TelegramBackend;
 use crate::domain::{
@@ -3419,6 +3419,10 @@ struct RequestMutationApprovalArgs {
         description = "Exact payload_sha256 returned by a prepare mutation tool and rendered in the Telegram approval card."
     )]
     approved_payload_sha256: String,
+    #[schemars(
+        description = "Required plain-language explanation why this mutation is requested; it is shown on the approval card as 'Зачем' and bound to this approval."
+    )]
+    purpose: String,
     #[serde(default)]
     #[schemars(
         description = "Managed MCP keeps provider execution inside the MCP approval worker. External owner hands the approved mutation back to the caller, which owns the provider-attempt boundary."
@@ -15211,6 +15215,11 @@ impl McpServer {
                 "request_mutation_approval.mutation_id must not be empty",
             ))));
         }
+        let Some(purpose) = normalize_mutation_purpose(&args.purpose) else {
+            return Err(Json(ToolOutcome::failure(ToolFailure::invalid_argument(
+                "request_mutation_approval.purpose must explain why this mutation is requested",
+            ))));
+        };
         let runtime = self.approval.as_ref().ok_or_else(|| {
             Json(ToolOutcome::failure(ToolFailure::new(
                 "APPROVAL_NOT_CONFIGURED",
@@ -15294,6 +15303,7 @@ impl McpServer {
                 runtime.policy.approval_chat_id,
                 runtime.policy.approval_user_id,
                 approval_ttl_seconds,
+                Some(purpose.as_str()),
             ),
             MutationExecutionOwner::ExternalOwner => {
                 self.mutation_ledger.create_or_get_external_owner_approval(
@@ -15302,6 +15312,7 @@ impl McpServer {
                     runtime.policy.approval_chat_id,
                     runtime.policy.approval_user_id,
                     approval_ttl_seconds,
+                    Some(purpose.as_str()),
                 )
             },
         }
@@ -15399,6 +15410,7 @@ impl McpServer {
             .mutation_ledger
             .get_invite_progress(&request.public.mutation_id)
             .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
+        let chat_label = self.resolve_mutation_chat_label(&request.public.action).await;
         match runtime
             .bot
             .send_mutation_card(&MutationApprovalCard {
@@ -15410,6 +15422,7 @@ impl McpServer {
                     &request.public.action,
                 )
                 .await,
+                chat_label,
             })
             .await
         {
@@ -31738,6 +31751,41 @@ impl McpServer {
         }
     }
 
+    /// Human chat identity for an approval card. Resolution failure is not a
+    /// card failure: the card then says the name is unavailable and keeps the
+    /// raw id next to it. Cards with their own human target names (scheduled
+    /// sends, file/story sends) skip the extra Telegram round-trip.
+    async fn resolve_mutation_chat_label(
+        &self,
+        action: &MutationAction,
+    ) -> Option<MutationChatLabel> {
+        if matches!(
+            action,
+            MutationAction::ScheduleMessage { .. }
+                | MutationAction::ScheduleFile { .. }
+                | MutationAction::SendFile { .. }
+                | MutationAction::SendStory { .. }
+        ) {
+            return None;
+        }
+        let peer = mutation_chat_peer(action)?;
+        match self.backend.get_chat_lifecycle_state(None, &peer).await {
+            Ok(state) => Some(MutationChatLabel {
+                chat_id: state.details.chat.chat_id,
+                title: Some(state.details.chat.title).filter(|title| !title.trim().is_empty()),
+                username: state.details.chat.username,
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    peer = %peer,
+                    error = %error,
+                    "mutation card chat name resolution failed"
+                );
+                Some(MutationChatLabel { chat_id: peer, title: None, username: None })
+            },
+        }
+    }
+
     async fn edit_mutation_approval_card(
         &self,
         runtime: &ApprovalRuntime,
@@ -31760,6 +31808,7 @@ impl McpServer {
             &approval.action,
         )
         .await;
+        let chat_label = self.resolve_mutation_chat_label(&approval.action).await;
         if let Err(error) = runtime
             .bot
             .edit_mutation_card(
@@ -31767,6 +31816,7 @@ impl McpServer {
                     approval: approval.clone(),
                     invite_progress,
                     media: card_media,
+                    chat_label,
                 },
                 message_id,
             )
@@ -36906,6 +36956,27 @@ fn approval_retry_delay(attempt: u32) -> i64 {
     5_i64.saturating_mul(1_i64 << exponent).min(300)
 }
 
+/// Upper bound of the card "Зачем" line: one plain-text line, long enough for
+/// a concrete sentence and short enough to keep the card readable.
+const MAX_MUTATION_PURPOSE_CHARS: usize = 240;
+
+/// The approval card "Зачем" line: collapse whitespace so a multi-line or
+/// padded explanation cannot leak layout into the card, bound its length, and
+/// reject an empty one.
+fn normalize_mutation_purpose(value: &str) -> Option<String> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut chars = normalized.chars();
+    let truncated: String = chars.by_ref().take(MAX_MUTATION_PURPOSE_CHARS).collect();
+    if chars.next().is_some() {
+        Some(format!("{truncated}…"))
+    } else {
+        Some(truncated)
+    }
+}
+
 fn now_unix() -> i64 {
     i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
         .unwrap_or(i64::MAX)
@@ -38417,6 +38488,39 @@ fn mutation_target_peer(action: &MutationAction) -> Option<String> {
         match value {
             serde_json::Value::Object(map) => {
                 for key in ["chat_id", "target_chat_id", "peer_ref", "user_id"] {
+                    if let Some(found) = map.get(key).and_then(serde_json::Value::as_str) {
+                        if !found.trim().is_empty() {
+                            return Some(found.to_string());
+                        }
+                    }
+                    if let Some(found) = map.get(key).and_then(serde_json::Value::as_i64) {
+                        return Some(found.to_string());
+                    }
+                }
+                map.values().find_map(|nested| search(nested, depth + 1))
+            }
+            serde_json::Value::Array(items) => {
+                items.iter().find_map(|nested| search(nested, depth + 1))
+            }
+            _ => None,
+        }
+    }
+    search(&value, 0)
+}
+
+/// The chat a mutation card talks about, when the action has one. Unlike
+/// `mutation_target_peer`, `user_id` alone never qualifies: a card for a
+/// contact-level action must not pretend a user is a chat, and the caller
+/// then simply renders no chat line.
+fn mutation_chat_peer(action: &MutationAction) -> Option<String> {
+    let value = serde_json::to_value(action).ok()?;
+    fn search(value: &serde_json::Value, depth: usize) -> Option<String> {
+        if depth > 4 {
+            return None;
+        }
+        match value {
+            serde_json::Value::Object(map) => {
+                for key in ["chat_id", "target_chat_id", "peer_ref"] {
                     if let Some(found) = map.get(key).and_then(serde_json::Value::as_str) {
                         if !found.trim().is_empty() {
                             return Some(found.to_string());

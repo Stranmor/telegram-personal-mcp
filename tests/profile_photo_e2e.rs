@@ -61,6 +61,7 @@ macro_rules! approve_mutation {
             .call_tool(
                 CallToolRequestParams::new("request_mutation_approval").with_arguments(
                     json!({
+                        "purpose": "тест: подготовка мутации к подтверждению",
                         "mutation_id": mutation_id,
                         "approved_payload_sha256": payload_sha256
                     })

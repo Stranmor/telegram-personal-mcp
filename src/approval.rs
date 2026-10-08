@@ -367,6 +367,37 @@ pub struct MutationApprovalCard {
     pub approval: MutationApproval,
     pub invite_progress: Option<InviteBatchProgress>,
     pub media: Option<CardMedia>,
+    /// Human chat identity resolved by the MCP layer right before the card is
+    /// rendered; transient like `media` and never stored in the ledger.
+    pub chat_label: Option<MutationChatLabel>,
+}
+
+/// Human identity of the chat a mutation targets. `title` and `username` stay
+/// empty when Telegram did not answer the resolution at card-build time; the
+/// card then says the name is unavailable instead of guessing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationChatLabel {
+    pub chat_id: String,
+    pub title: Option<String>,
+    pub username: Option<String>,
+}
+
+impl MutationChatLabel {
+    fn plain_text(&self) -> String {
+        let title = self.title.as_deref().map(str::trim).filter(|value| !value.is_empty());
+        let username = self
+            .username
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("@{}", value.trim_start_matches('@')));
+        match (title, username) {
+            (Some(title), Some(username)) => format!("{title} ({username})"),
+            (Some(title), None) => title.to_string(),
+            (None, Some(username)) => username,
+            (None, None) => format!("название недоступно (id {})", self.chat_id),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2128,8 +2159,10 @@ fn render_send_file_card(
         },
         _ => String::new(),
     };
+    let context = mutation_human_context_html(approval);
+    let consequences = mutation_consequences_html(approval);
     let rendered = format!(
-        "{title}\n\n<b>Куда:</b> <code>{}</code>\n<b>Что:</b> {} · <code>{}</code> · {}{reply_detail}\n<b>Подпись ({caption_len} знаков):</b>\n<blockquote>{}</blockquote>\n🔐 <code>{}…</code>\n\n{note}{receipt_detail}",
+        "{title}{context}\n\n<b>Куда:</b> <code>{}</code>\n<b>Что:</b> {} · <code>{}</code> · {}{reply_detail}\n<b>Подпись ({caption_len} знаков):</b>\n<blockquote>{}</blockquote>\n🔐 <code>{}…</code>\n\n{note}{receipt_detail}{consequences}",
         escape_html(chat_id),
         send_file_kind_label(mode),
         escape_html(&artifact.file_name),
@@ -2198,8 +2231,10 @@ fn render_send_story_card(
         },
         _ => String::new(),
     };
+    let context = mutation_human_context_html(approval);
+    let consequences = mutation_consequences_html(approval);
     let rendered = format!(
-        "{title}\n\n<b>Куда:</b> <code>{}</code>\n<b>Кадр:</b> <code>{}</code> · {}\n<b>Видно:</b> {}\n<b>Время жизни:</b> {}\n<b>Подпись ({caption_len} знаков):</b>\n<blockquote>{}</blockquote>\n🔐 <code>{}…</code>\n\n{note}{receipt_detail}",
+        "{title}{context}\n\n<b>Куда:</b> <code>{}</code>\n<b>Кадр:</b> <code>{}</code> · {}\n<b>Видно:</b> {}\n<b>Время жизни:</b> {}\n<b>Подпись ({caption_len} знаков):</b>\n<blockquote>{}</blockquote>\n🔐 <code>{}…</code>\n\n{note}{receipt_detail}{consequences}",
         escape_html(peer_ref),
         escape_html(&artifact.file_name),
         human_file_size(artifact.size_bytes),
@@ -2219,6 +2254,123 @@ fn scheduled_delivery_label(schedule_date_unix: i32) -> String {
         return "когда получатель появится онлайн".to_string();
     }
     moscow_datetime_label(i64::from(schedule_date_unix))
+}
+
+/// Short decision deadline in the operator timezone: `09.10 13:28`.
+fn moscow_short_datetime_label(timestamp_unix: i64) -> String {
+    let Some(utc) = DateTime::<Utc>::from_timestamp(timestamp_unix, 0) else {
+        return "время не распознано".to_string();
+    };
+    let moscow = FixedOffset::east_opt(3 * 60 * 60).expect("Moscow UTC offset must be valid");
+    let local = utc.with_timezone(&moscow);
+    format!("{:02}.{:02} {:02}:{:02}", local.day(), local.month(), local.hour(), local.minute())
+}
+
+/// True while the card still shows live decision buttons, so the human
+/// context may promise the deadline and explain both buttons.
+fn mutation_card_waits_for_decision(approval: &MutationApproval) -> bool {
+    !approval.external_owner_ready
+        && matches!(
+            approval.state,
+            MutationApprovalState::DispatchingCard
+                | MutationApprovalState::Pending
+                | MutationApprovalState::CardDeliveryUncertain
+        )
+}
+
+fn mutation_purpose_label(approval: &MutationApproval) -> &str {
+    approval
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("не указана")
+}
+
+/// Label of the positive decision button of a live mutation card. It is the
+/// single source for both the keyboard and the "what happens" card lines.
+fn mutation_approve_button_label(action: &MutationAction) -> &'static str {
+    match action {
+        MutationAction::ScheduleMessage { .. } | MutationAction::ScheduleFile { .. } => {
+            "🗓 Запланировать"
+        },
+        MutationAction::EditScheduledMessage { .. } => "✅ Сохранить",
+        MutationAction::DeleteScheduledMessages { .. } => "🗑 Удалить",
+        MutationAction::SendScheduledMessagesNow { .. } => "✉️ Отправить сейчас",
+        MutationAction::SendFile { .. } | MutationAction::SendStory { .. } => "✅ Опубликовать",
+        _ => "✅ Применить",
+    }
+}
+
+fn mutation_approve_effect(action: &MutationAction) -> &'static str {
+    match action {
+        MutationAction::ScheduleMessage { .. } | MutationAction::ScheduleFile { .. } => {
+            "поставить отправку в расписание Telegram"
+        },
+        MutationAction::EditScheduledMessage { .. } => "сохранить новые параметры в расписании",
+        MutationAction::DeleteScheduledMessages { .. } => {
+            "удалить выбранные сообщения из расписания"
+        },
+        MutationAction::SendScheduledMessagesNow { .. } => {
+            "отправить запланированные сообщения сейчас"
+        },
+        MutationAction::SendFile { .. } | MutationAction::SendStory { .. } => {
+            "опубликовать сейчас, не ожидая решения по времени"
+        },
+        _ => "выполнить изменение в Telegram",
+    }
+}
+
+/// One line per decision button: exactly what the owner's tap will do.
+fn mutation_button_consequences(action: &MutationAction) -> String {
+    format!(
+        "«{}» — {}; результат и квитанция появятся в этой карточке.\n«❌ Отменить» — отклонить запрос; ничего не изменится.",
+        mutation_approve_button_label(action),
+        mutation_approve_effect(action),
+    )
+}
+
+/// Plain-text human context of a mutation card: the resolved chat, the
+/// initiator's "why", and the human deadline while the decision is pending.
+fn mutation_human_context(
+    approval: &MutationApproval,
+    chat_label: Option<&MutationChatLabel>,
+) -> String {
+    let mut lines = Vec::new();
+    if let Some(label) = chat_label {
+        lines.push(format!("Чат: {}", label.plain_text()));
+    }
+    lines.push(format!("Зачем: {}", mutation_purpose_label(approval)));
+    if mutation_card_waits_for_decision(approval) {
+        lines.push(format!(
+            "Действует до: {} МСК",
+            moscow_short_datetime_label(approval.expires_at_unix)
+        ));
+    }
+    lines.join("\n")
+}
+
+/// The same human context inside an HTML card (send/schedule renderers).
+fn mutation_human_context_html(approval: &MutationApproval) -> String {
+    let mut lines = vec![format!(
+        "🎯 <b>Зачем:</b> {}",
+        escape_html(mutation_purpose_label(approval))
+    )];
+    if mutation_card_waits_for_decision(approval) {
+        lines.push(format!(
+            "⏳ <b>Действует до:</b> {} МСК",
+            moscow_short_datetime_label(approval.expires_at_unix)
+        ));
+    }
+    format!("\n\n{}", lines.join("\n"))
+}
+
+fn mutation_consequences_html(approval: &MutationApproval) -> String {
+    if mutation_card_waits_for_decision(approval) {
+        format!("\n\n{}", escape_html(&mutation_button_consequences(&approval.action)))
+    } else {
+        String::new()
+    }
 }
 
 fn moscow_datetime_label(timestamp_unix: i64) -> String {
@@ -2419,8 +2571,10 @@ fn render_schedule_message_card(
         },
         _ => String::new(),
     };
+    let context = mutation_human_context_html(approval);
+    let consequences = mutation_consequences_html(approval);
     let rendered = format!(
-        "{title}\n\n👤 <b>Кому:</b> {}{source_detail}\n🕒 <b>Отправка:</b> {}{reply_detail}{delivery_detail}\n\n<b>✉️ Точный текст</b>\n<blockquote>{}</blockquote>\n\n{note}{receipt_detail}",
+        "{title}{context}\n\n👤 <b>Кому:</b> {}{source_detail}\n🕒 <b>Отправка:</b> {}{reply_detail}{delivery_detail}\n\n<b>✉️ Точный текст</b>\n<blockquote>{}</blockquote>\n\n{note}{receipt_detail}{consequences}",
         scheduled_target_html(chat_id, target),
         scheduled_delivery_label(schedule_date_unix),
         escape_html(text),
@@ -2516,8 +2670,10 @@ fn render_schedule_file_card(
         _ => String::new(),
     };
     let caption_detail = if caption.is_empty() { "[без подписи]" } else { caption };
+    let context = mutation_human_context_html(approval);
+    let consequences = mutation_consequences_html(approval);
     let rendered = format!(
-        "{title}\n\n👤 <b>Кому:</b> {}{source_detail}\n🕒 <b>Отправка:</b> {}{reply_detail}{delivery_detail}\n\n<b>📎 Точный файл</b>\nИмя: <code>{}</code> · Размер: {} байт · Режим: {:?}\nSHA-256: <code>{}</code>\n\n<b>Подпись</b> · {:?}\n<blockquote>{}</blockquote>\n\n{note}{receipt_detail}",
+        "{title}{context}\n\n👤 <b>Кому:</b> {}{source_detail}\n🕒 <b>Отправка:</b> {}{reply_detail}{delivery_detail}\n\n<b>📎 Точный файл</b>\nИмя: <code>{}</code> · Размер: {} байт · Режим: {:?}\nSHA-256: <code>{}</code>\n\n<b>Подпись</b> · {:?}\n<blockquote>{}</blockquote>\n\n{note}{receipt_detail}{consequences}",
         scheduled_target_html(chat_id, target),
         scheduled_delivery_label(schedule_date_unix),
         escape_html(&artifact.file_name),
@@ -5642,8 +5798,14 @@ fn render_mutation_card(card: &MutationApprovalCard) -> Result<String, ApprovalB
             )
         },
     };
+    let context = mutation_human_context(approval, card.chat_label.as_ref());
+    let consequences = if mutation_card_waits_for_decision(approval) {
+        format!("\n\n{}", mutation_button_consequences(&approval.action))
+    } else {
+        String::new()
+    };
     let text = format!(
-        "{title}\n\nСтатус: {status}\n{target}\n\n{payload}\n\nSHA-256: {}\nMutation: {}\nApproval: {}\nДействует до (Unix): {}\nРезультат: {result}",
+        "{title}\n\nСтатус: {status}\n{context}\n{target}\n\n{payload}{consequences}\n\nSHA-256: {}\nMutation: {}\nApproval: {}\nДействует до (Unix): {}\nРезультат: {result}",
         approval.payload_sha256,
         approval.mutation_id,
         approval.approval_id,
@@ -5687,18 +5849,7 @@ fn keyboard_for_mutation(approval: &MutationApproval) -> InlineKeyboardMarkup {
             | MutationApprovalState::Pending
             | MutationApprovalState::CardDeliveryUncertain
     ) {
-        let approve_label = match &approval.action {
-            MutationAction::ScheduleMessage { .. } | MutationAction::ScheduleFile { .. } => {
-                "🗓 Запланировать"
-            },
-            MutationAction::EditScheduledMessage { .. } => "✅ Сохранить",
-            MutationAction::DeleteScheduledMessages { .. } => "🗑 Удалить",
-            MutationAction::SendScheduledMessagesNow { .. } => "✉️ Отправить сейчас",
-            MutationAction::SendFile { .. } | MutationAction::SendStory { .. } => {
-                "✅ Опубликовать"
-            },
-            _ => "✅ Применить",
-        };
+        let approve_label = mutation_approve_button_label(&approval.action);
         vec![vec![
             InlineKeyboardButton {
                 text: approve_label.to_string(),
@@ -6432,6 +6583,7 @@ mod tests {
             next_retry_at_unix: None,
             last_error_code: None,
             last_error_message: None,
+            purpose: None,
         }
     }
     fn sample_send_file_approval(
@@ -6473,6 +6625,7 @@ mod tests {
             next_retry_at_unix: None,
             last_error_code: None,
             last_error_message: None,
+            purpose: None,
         }
     }
 
@@ -6522,6 +6675,7 @@ mod tests {
             next_retry_at_unix: None,
             last_error_code: None,
             last_error_message: None,
+            purpose: None,
         }
     }
 
@@ -6568,6 +6722,7 @@ mod tests {
             approval: approval.clone(),
             invite_progress: None,
             media: None,
+            chat_label: None,
         })
         .expect("card");
 
@@ -6584,6 +6739,10 @@ mod tests {
         );
         assert!(rendered.contains("<b>✉️ Точный текст</b>"));
         assert!(rendered.contains("Telegram добавит сообщение в расписание"));
+        assert!(rendered.contains("🎯 <b>Зачем:</b> не указана"));
+        assert!(rendered.contains("⏳ <b>Действует до:</b> 02.08 01:50 МСК"));
+        assert!(rendered.contains("«🗓 Запланировать» — поставить отправку в расписание Telegram"));
+        assert!(rendered.contains("«❌ Отменить» — отклонить запрос; ничего не изменится."));
         assert!(!rendered.contains(&approval.payload_sha256));
         assert!(!rendered.contains(&approval.mutation_id));
         assert!(!rendered.contains(&approval.approval_id));
@@ -6651,6 +6810,7 @@ mod tests {
             approval,
             invite_progress: None,
             media: None,
+            chat_label: None,
         })
         .expect("card");
         assert!(rendered.contains(
@@ -6671,6 +6831,7 @@ mod tests {
             approval: approval.clone(),
             invite_progress: None,
             media: None,
+            chat_label: None,
         })
         .expect("card");
         assert!(rendered.starts_with("✅ <b>Сообщение запланировано</b>"));
@@ -6687,6 +6848,7 @@ mod tests {
             approval: approval.clone(),
             invite_progress: None,
             media: None,
+            chat_label: None,
         })
         .expect("card");
 
@@ -6698,14 +6860,22 @@ mod tests {
     #[test]
     fn send_file_card_is_readable_with_preview_details() {
         let caption = "Привет, Иркутск! Точный текст подписи.";
-        let approval = sample_send_file_approval(MutationApprovalState::Pending, caption);
+        let mut approval = sample_send_file_approval(MutationApprovalState::Pending, caption);
+        approval.purpose = Some("показать <b>подпись</b> клиенту".to_string());
         let rendered = render_mutation_card(&MutationApprovalCard {
             approval: approval.clone(),
             invite_progress: None,
             media: None,
+            chat_label: None,
         })
         .expect("card");
         assert!(rendered.starts_with("📤 <b>Отправка в Telegram</b>"));
+        assert!(rendered.contains("🎯 <b>Зачем:</b> показать &lt;b&gt;подпись&lt;/b&gt; клиенту"));
+        assert!(rendered.contains("⏳ <b>Действует до:</b> 02.08 01:50 МСК"));
+        assert!(rendered.contains(
+            "«✅ Опубликовать» — опубликовать сейчас, не ожидая решения по времени"
+        ));
+        assert!(rendered.contains("«❌ Отменить» — отклонить запрос; ничего не изменится."));
         assert!(rendered.contains("<b>Куда:</b> <code>900000007</code>"));
         assert!(rendered.contains("<b>Что:</b> фото"));
         assert!(rendered.contains("<code>праздник-на-байкале.jpg</code>"));
@@ -6733,6 +6903,7 @@ mod tests {
             approval: approval.clone(),
             invite_progress: None,
             media: None,
+            chat_label: None,
         })
         .expect("card");
         assert!(rendered.starts_with("📸 <b>Публикация сторис</b>"));
@@ -6755,6 +6926,124 @@ mod tests {
         assert_eq!(keyboard.inline_keyboard[0][1].text, "❌ Отменить");
     }
 
+    fn sample_add_member_approval(state: MutationApprovalState) -> MutationApproval {
+        MutationApproval {
+            approval_id: "94d0b1e3-6f4c-4a8d-b13c-4e5f60718293".to_string(),
+            mutation_id: "c3d4e5f6-a7b8-4c9d-0e1f-a2b3c4d5e6f7".to_string(),
+            schema_version: 1,
+            account_user_id: 900_000_001,
+            action: MutationAction::AddChatMember {
+                chat_id: "-1003309863896".to_string(),
+                user: crate::domain::ContactSummary {
+                    user_id: 8_580_953_884,
+                    first_name: "Heartbeat".to_string(),
+                    last_name: None,
+                    display_name: "Heartbeat".to_string(),
+                    username: Some("stranmor_heartbeat_bot".to_string()),
+                    phone: None,
+                    is_contact: false,
+                    mutual_contact: false,
+                    bot: true,
+                    verified: false,
+                    premium: false,
+                    scam: false,
+                    restricted: false,
+                },
+                before: None,
+            },
+            payload_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                .to_string(),
+            state,
+            execution_owner: MutationExecutionOwner::ManagedMcp,
+            external_owner_ready: false,
+            external_owner_receipt: None,
+            approval_chat_id: 900_000_003,
+            approval_user_id: 900_000_004,
+            approval_message_id: None,
+            created_at_unix: 1_791_540_000,
+            expires_at_unix: 1_791_541_712,
+            result: None,
+            automated_retry_count: 0,
+            next_retry_at_unix: None,
+            last_error_code: None,
+            last_error_message: None,
+            purpose: None,
+        }
+    }
+
+    #[test]
+    fn mutation_card_explains_the_chat_and_the_reason() {
+        let mut approval = sample_add_member_approval(MutationApprovalState::Pending);
+        approval.purpose =
+            Some("проба демо-пакета: проверка публикации ботом в тестовом канале".to_string());
+        let rendered = render_mutation_card(&MutationApprovalCard {
+            approval: approval.clone(),
+            invite_progress: None,
+            media: None,
+            chat_label: Some(MutationChatLabel {
+                chat_id: "-1003309863896".to_string(),
+                title: Some("Hermes AI Test".to_string()),
+                username: Some("hermes_ai_test".to_string()),
+            }),
+        })
+        .expect("card");
+
+        assert!(rendered.contains("Чат: Hermes AI Test (@hermes_ai_test)"));
+        assert!(rendered.contains(
+            "Зачем: проба демо-пакета: проверка публикации ботом в тестовом канале"
+        ));
+        assert!(rendered.contains("Действует до: 09.10 13:28 МСК"));
+        assert!(rendered.contains(
+            "«✅ Применить» — выполнить изменение в Telegram; результат и квитанция появятся в этой карточке."
+        ));
+        assert!(rendered.contains("«❌ Отменить» — отклонить запрос; ничего не изменится."));
+        assert!(rendered.contains("Пользователь: 8580953884 (@stranmor_heartbeat_bot)"));
+        let technical = rendered.find("SHA-256:").expect("technical block");
+        assert!(technical > rendered.find("«❌ Отменить»").expect("cancel line"));
+        assert!(rendered.contains(&format!("\nMutation: {}\n", approval.mutation_id)));
+        assert!(rendered.contains(&format!("\nApproval: {}\n", approval.approval_id)));
+        assert!(rendered.contains("Действует до (Unix): 1791541712"));
+        assert!(rendered.ends_with("Результат: —"));
+    }
+
+    #[test]
+    fn mutation_card_without_chat_name_stays_honest() {
+        let approval = sample_add_member_approval(MutationApprovalState::Pending);
+        let rendered = render_mutation_card(&MutationApprovalCard {
+            approval,
+            invite_progress: None,
+            media: None,
+            chat_label: Some(MutationChatLabel {
+                chat_id: "-1003309863896".to_string(),
+                title: None,
+                username: None,
+            }),
+        })
+        .expect("card");
+
+        assert!(rendered.contains("Чат: название недоступно (id -1003309863896)"));
+        assert!(rendered.contains("Зачем: не указана"));
+    }
+
+    #[test]
+    fn terminal_mutation_card_hides_live_consequences() {
+        let mut approval = sample_add_member_approval(MutationApprovalState::Cancelled);
+        approval.purpose = Some("тест отмены".to_string());
+        let rendered = render_mutation_card(&MutationApprovalCard {
+            approval,
+            invite_progress: None,
+            media: None,
+            chat_label: None,
+        })
+        .expect("card");
+
+        assert!(rendered.starts_with("ДОБАВЛЕНИЕ УЧАСТНИКА В TELEGRAM-ЧАТ"));
+        assert!(rendered.contains("Статус: ❌ Отменено"));
+        assert!(rendered.contains("Зачем: тест отмены"));
+        assert!(!rendered.contains("«❌ Отменить»"));
+        assert!(!rendered.contains("Действует до: "));
+    }
+
     #[tokio::test]
     async fn mutation_card_uses_media_preview_for_short_caption() {
         let approval = sample_send_file_approval(
@@ -6771,6 +7060,7 @@ mod tests {
             approval: approval.clone(),
             invite_progress: None,
             media: Some(media.clone()),
+            chat_label: None,
         };
         let rendered = render_mutation_card(&card).expect("card");
         assert!(rendered.encode_utf16().count() <= MAX_MEDIA_CAPTION_UTF16);
@@ -6799,6 +7089,7 @@ mod tests {
             approval: approval.clone(),
             invite_progress: None,
             media: Some(media),
+            chat_label: None,
         };
         let rendered = render_mutation_card(&card).expect("card");
         assert!(rendered.encode_utf16().count() > MAX_MEDIA_CAPTION_UTF16);

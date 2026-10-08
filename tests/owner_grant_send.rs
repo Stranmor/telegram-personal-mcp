@@ -649,7 +649,7 @@ async fn owner_grant_mutation_matches_the_target_peer_not_a_substring() -> anyho
         let requested = client
             .call_tool(
                 CallToolRequestParams::new("request_mutation_approval").with_arguments(
-                    json!({ "mutation_id": mutation_id, "approved_payload_sha256": payload_sha256 })
+                    json!({ "purpose": "тест: подготовка мутации к подтверждению", "mutation_id": mutation_id, "approved_payload_sha256": payload_sha256 })
                         .as_object()
                         .expect("object")
                         .clone(),

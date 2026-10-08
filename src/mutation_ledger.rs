@@ -622,6 +622,7 @@ impl MutationLedger {
         approval_chat_id: i64,
         approval_user_id: i64,
         ttl_seconds: u64,
+        purpose: Option<&str>,
     ) -> rusqlite::Result<MutationApprovalRequestRecord> {
         self.create_or_get_approval_with_owner(
             mutation_id,
@@ -629,6 +630,7 @@ impl MutationLedger {
             approval_chat_id,
             approval_user_id,
             ttl_seconds,
+            purpose,
             MutationExecutionOwner::ManagedMcp,
         )
     }
@@ -640,6 +642,7 @@ impl MutationLedger {
         approval_chat_id: i64,
         approval_user_id: i64,
         ttl_seconds: u64,
+        purpose: Option<&str>,
     ) -> rusqlite::Result<MutationApprovalRequestRecord> {
         self.create_or_get_approval_with_owner(
             mutation_id,
@@ -647,6 +650,7 @@ impl MutationLedger {
             approval_chat_id,
             approval_user_id,
             ttl_seconds,
+            purpose,
             MutationExecutionOwner::ExternalOwner,
         )
     }
@@ -658,6 +662,7 @@ impl MutationLedger {
         approval_chat_id: i64,
         approval_user_id: i64,
         ttl_seconds: u64,
+        purpose: Option<&str>,
         execution_owner: MutationExecutionOwner,
     ) -> rusqlite::Result<MutationApprovalRequestRecord> {
         let mut connection = self.connection()?;
@@ -697,10 +702,12 @@ impl MutationLedger {
                 approval_id, mutation_id, payload_sha256, state,
                 approval_chat_id, approval_user_id, bot_message_id,
                 created_at, expires_at, decided_at,
-                automated_retry_count, next_retry_at, last_error_code, last_error_message
+                automated_retry_count, next_retry_at, last_error_code, last_error_message,
+                purpose
              ) VALUES (
                 ?1, ?2, ?3, 'dispatching_card', ?4, ?5, NULL,
-                ?6, ?7, NULL, 0, NULL, NULL, NULL
+                ?6, ?7, NULL, 0, NULL, NULL, NULL,
+                ?8
              )",
             params![
                 approval_id,
@@ -710,6 +717,7 @@ impl MutationLedger {
                 approval_user_id,
                 now,
                 expires_at,
+                purpose,
             ],
         );
         if let Err(error) = insert {
@@ -1407,7 +1415,7 @@ impl MutationLedger {
                     a.approval_chat_id, a.approval_user_id, a.bot_message_id,
                     a.created_at, a.expires_at, p.result_json,
                     a.automated_retry_count, a.next_retry_at, a.last_error_code,
-                    a.last_error_message,
+                    a.last_error_message, a.purpose,
                     h.receipt, h.approved_at, h.consumed_at
              FROM mutation_approvals a
              JOIN prepared_mutations p ON p.mutation_id = a.mutation_id
@@ -1527,7 +1535,8 @@ impl MutationLedger {
                  automated_retry_count INTEGER NOT NULL DEFAULT 0,
                  next_retry_at INTEGER,
                  last_error_code TEXT,
-                 last_error_message TEXT
+                 last_error_message TEXT,
+                 purpose TEXT
              );
              CREATE TABLE IF NOT EXISTS mutation_external_handoffs (
                  approval_id TEXT PRIMARY KEY REFERENCES mutation_approvals(approval_id),
@@ -1586,6 +1595,23 @@ impl MutationLedger {
         if !has_last_error_message {
             connection
                 .execute("ALTER TABLE mutation_approvals ADD COLUMN last_error_message TEXT", [])?;
+        }
+        let has_purpose = {
+            let mut statement = connection.prepare("PRAGMA table_info(mutation_approvals)")?;
+            let mut rows = statement.query([])?;
+            let mut found = false;
+            while let Some(row) = rows.next()? {
+                let column_name: String = row.get(1)?;
+                if column_name == "purpose" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_purpose {
+            connection
+                .execute("ALTER TABLE mutation_approvals ADD COLUMN purpose TEXT", [])?;
         }
         Ok(connection)
     }
@@ -1795,7 +1821,7 @@ fn get_approval_from_connection(
                     a.approval_chat_id, a.approval_user_id, a.bot_message_id,
                     a.created_at, a.expires_at, p.result_json,
                     a.automated_retry_count, a.next_retry_at, a.last_error_code,
-                    a.last_error_message,
+                    a.last_error_message, a.purpose,
                     h.receipt, h.approved_at, h.consumed_at
              FROM mutation_approvals a
              JOIN prepared_mutations p ON p.mutation_id = a.mutation_id
@@ -1818,7 +1844,7 @@ fn get_latest_reusable_approval(
                     a.approval_chat_id, a.approval_user_id, a.bot_message_id,
                     a.created_at, a.expires_at, p.result_json,
                     a.automated_retry_count, a.next_retry_at, a.last_error_code,
-                    a.last_error_message,
+                    a.last_error_message, a.purpose,
                     h.receipt, h.approved_at, h.consumed_at
              FROM mutation_approvals a
              JOIN prepared_mutations p ON p.mutation_id = a.mutation_id
@@ -1842,9 +1868,10 @@ fn map_approval_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MutationApprova
     let state: String = row.get(6)?;
     let result_json: Option<String> = row.get(12)?;
     let retry_count: i64 = row.get(13)?;
-    let external_owner_receipt: Option<String> = row.get(17)?;
-    let external_owner_approved_at: Option<i64> = row.get(18)?;
-    let external_owner_consumed_at: Option<i64> = row.get(19)?;
+    let purpose: Option<String> = row.get(17)?;
+    let external_owner_receipt: Option<String> = row.get(18)?;
+    let external_owner_approved_at: Option<i64> = row.get(19)?;
+    let external_owner_consumed_at: Option<i64> = row.get(20)?;
     let execution_owner = if external_owner_receipt.is_some() {
         MutationExecutionOwner::ExternalOwner
     } else {
@@ -1884,6 +1911,7 @@ fn map_approval_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MutationApprova
         next_retry_at_unix: row.get(14)?,
         last_error_code: row.get(15)?,
         last_error_message: row.get(16)?,
+        purpose,
     })
 }
 
@@ -2099,8 +2127,16 @@ mod tests {
         };
         let prepared = ledger.prepare(7, action.clone(), "abc".to_string()).expect("prepare");
         let requested = ledger
-            .create_or_get_approval(&prepared.public.mutation_id, "abc", 700, 700, 3600)
+            .create_or_get_approval(
+                &prepared.public.mutation_id,
+                "abc",
+                700,
+                700,
+                3600,
+                Some("тест: цель запроса"),
+            )
             .expect("approval");
+        assert_eq!(requested.public.purpose.as_deref(), Some("тест: цель запроса"));
         ledger.mark_approval_card_delivered(&requested.public.approval_id, 55).expect("card");
         assert!(
             ledger
@@ -2155,7 +2191,7 @@ mod tests {
         };
         let prepared = ledger.prepare(7, action, "schedule-hash".to_string()).expect("prepare");
         let requested = ledger
-            .create_or_get_approval(&prepared.public.mutation_id, "schedule-hash", 700, 700, 3_600)
+            .create_or_get_approval(&prepared.public.mutation_id, "schedule-hash", 700, 700, 3_600, None)
             .expect("approval");
         ledger.mark_approval_card_delivered(&requested.public.approval_id, 55).expect("card");
 
@@ -2295,6 +2331,7 @@ mod tests {
                 700,
                 700,
                 3_600,
+                None,
             )
             .expect("external-owner approval");
         assert_eq!(requested.public.execution_owner, MutationExecutionOwner::ExternalOwner);
@@ -2436,7 +2473,7 @@ mod tests {
             .prepare_invite_batch(7, action, "invite-hash".to_string(), &[initial])
             .expect("prepare batch");
         let requested = ledger
-            .create_or_get_approval(&prepared.public.mutation_id, "invite-hash", 700, 700, 3_600)
+            .create_or_get_approval(&prepared.public.mutation_id, "invite-hash", 700, 700, 3_600, None)
             .expect("approval");
         ledger.mark_approval_card_delivered(&requested.public.approval_id, 55).expect("card");
         let now = now_unix();

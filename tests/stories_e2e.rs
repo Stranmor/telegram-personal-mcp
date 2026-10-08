@@ -61,6 +61,7 @@ macro_rules! approve_mutation {
             .call_tool(
                 CallToolRequestParams::new("request_mutation_approval").with_arguments(
                     json!({
+                        "purpose": "тест: подготовка мутации к подтверждению",
                         "mutation_id": mutation_id,
                         "approved_payload_sha256": payload_sha256
                     })
@@ -364,6 +365,7 @@ async fn story_views_require_one_exact_idempotent_operator_approval() -> anyhow:
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": mutation_id,
                     "approved_payload_sha256": payload_sha256
                 })
@@ -1098,6 +1100,7 @@ async fn uncertain_story_report_recovery_never_replays_the_provider_call() -> an
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": prepared_data
                         .pointer("/data/mutation_id")
                         .and_then(Value::as_str)

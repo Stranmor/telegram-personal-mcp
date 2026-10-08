@@ -71,6 +71,7 @@ async fn prepare_mutation_and_approve(
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": prepared_data
                         .pointer("/data/mutation_id")
                         .and_then(Value::as_str)

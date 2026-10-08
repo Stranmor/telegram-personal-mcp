@@ -4125,6 +4125,11 @@ pub struct MutationApproval {
     pub last_error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error_message: Option<String>,
+    /// Human explanation of why the initiator requested this mutation. It is
+    /// rendered on the approval card as "Зачем" and never enters the payload
+    /// hash; old ledger rows keep it empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

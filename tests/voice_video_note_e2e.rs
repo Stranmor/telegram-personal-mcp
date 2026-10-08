@@ -74,6 +74,7 @@ async fn prepare_and_approve(
         .call_tool(
             CallToolRequestParams::new("request_mutation_approval").with_arguments(
                 json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
                     "mutation_id": prepared.pointer("/data/mutation_id").and_then(Value::as_str).expect("mutation id"),
                     "approved_payload_sha256": prepared.pointer("/data/payload_sha256").and_then(Value::as_str).expect("payload hash")
                 })
