@@ -249,19 +249,56 @@ async fn translation_transcription_and_fact_checks_are_approval_bound_and_recove
     assert_eq!(backend.translation_call_count().await, 2);
 
     backend.make_next_transcription_outcome_uncertain().await;
-    let (transcription_approval_id, transcription_message_id, _) = request_mutation!(
-        client,
-        "transcribe_audio",
-        json!({ "chat_id": "@alex", "message_id": 12 })
+    // Standing operator authorization (2026-09-11): a server-side voice-note
+    // transcription is a routine read-class operation, so the approval
+    // request executes it immediately — no card, no button press. The first
+    // provider attempt is made to look uncertain here; it is journalled as an
+    // unknown outcome and the recovery pass completes the transcription.
+    let prepared_transcription = client
+        .call_tool(
+            CallToolRequestParams::new("transcribe_audio").with_arguments(
+                json!({ "chat_id": "@alex", "message_id": 12 }).as_object().expect("object").clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(prepared_transcription.is_error, Some(false), "prepare transcribe_audio");
+    let prepared_transcription_data =
+        prepared_transcription.structured_content.expect("prepared mutation");
+    let transcription_mutation_id = prepared_transcription_data
+        .pointer("/data/mutation_id")
+        .and_then(Value::as_str)
+        .expect("mutation id")
+        .to_string();
+    let transcription_payload_sha256 = prepared_transcription_data
+        .pointer("/data/payload_sha256")
+        .and_then(Value::as_str)
+        .expect("payload sha256")
+        .to_string();
+    let requested_transcription = client
+        .call_tool(
+            CallToolRequestParams::new("request_mutation_approval").with_arguments(
+                json!({
+                    "mutation_id": transcription_mutation_id,
+                    "approved_payload_sha256": transcription_payload_sha256
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(requested_transcription.is_error, Some(false), "request transcribe_audio");
+    let transcription_receipt = requested_transcription.structured_content.expect("approval");
+    let transcription_approval_id = transcription_receipt
+        .pointer("/data/approval_id")
+        .and_then(Value::as_str)
+        .expect("approval id")
+        .to_string();
+    assert_eq!(
+        transcription_receipt.pointer("/data/state").and_then(Value::as_str),
+        Some("outcome_unknown"),
+        "the uncertain standing-authorized transcription must be journalled as unknown"
     );
-    bot.push_mutation_decision(
-        &transcription_approval_id,
-        ApprovalAction::Approve,
-        700,
-        700,
-        transcription_message_id,
-    )
-    .await;
     wait_for_mutation_state(
         &state_db_path,
         &transcription_approval_id,
