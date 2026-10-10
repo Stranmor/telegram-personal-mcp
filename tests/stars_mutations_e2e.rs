@@ -165,6 +165,7 @@ async fn star_gift_visibility_and_subscription_mutations_are_exact_and_recoverab
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
             owner_grant_file: None,
+            owner_permission_file: None,
         },
         bot.clone(),
     )
@@ -365,6 +366,7 @@ async fn star_gift_conversion_is_read_back_and_never_replayed_after_uncertain_de
                 ttl_seconds: 3_600,
                 poll_timeout_seconds: 1,
                 owner_grant_file: None,
+                owner_permission_file: None,
             },
             bot.clone(),
         )

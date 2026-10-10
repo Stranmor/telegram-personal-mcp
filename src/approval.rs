@@ -30,7 +30,7 @@ use reqwest::StatusCode;
 use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -61,6 +61,10 @@ pub struct ApprovalPolicy {
     /// budget + expiry) that lets an interactive session dispatch without a
     /// confirmation card. `None` keeps the card path exactly as it was.
     pub owner_grant_file: Option<std::path::PathBuf>,
+    /// Durable owner permissions mirror (#1598): subject-scoped authorizations
+    /// exported by orch. Read-only here; a record covers a denied peer only
+    /// with the owner's own quoted words. `None` keeps every card mandatory.
+    pub owner_permission_file: Option<std::path::PathBuf>,
 }
 
 impl ApprovalPolicy {
@@ -82,6 +86,11 @@ impl ApprovalPolicy {
                 return Err("owner_grant_file must be absolute");
             }
         }
+        if let Some(path) = &self.owner_permission_file {
+            if !path.is_absolute() {
+                return Err("owner_permission_file must be absolute");
+            }
+        }
         Ok(())
     }
 }
@@ -94,6 +103,7 @@ impl Default for ApprovalPolicy {
             ttl_seconds: 24 * 60 * 60,
             poll_timeout_seconds: 5,
             owner_grant_file: None,
+            owner_permission_file: None,
         }
     }
 }
@@ -274,6 +284,174 @@ fn journal_grant_use(path: &std::path::Path, use_record: &OwnerGrantUse) {
         use std::io::Write;
         let _ = writeln!(file, "{line}");
     }
+}
+
+/// Durable owner permissions (#1598): the orch registry exported to a
+/// read-only mirror this consumer consults. Unlike [`OwnerGrant`], the mirror
+/// itself is never rewritten here — every use is appended to a side journal,
+/// so exactly one writer owns each file: orch writes the mirror, MCP writes
+/// the journal.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct OwnerPermissionsFile {
+    pub v: u32,
+    #[serde(default)]
+    pub generated_at_unix: i64,
+    #[serde(default)]
+    pub permissions: Vec<OwnerPermissionRecord>,
+}
+
+/// One owner permission: a subject the owner explicitly authorized, the peers
+/// and actions it covers, the owner's own words as evidence, and its limits.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct OwnerPermissionRecord {
+    pub id: i64,
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub peers: Vec<String>,
+    #[serde(default)]
+    pub actions: Vec<String>,
+    #[serde(default)]
+    pub evidence: OwnerPermissionEvidence,
+    #[serde(default)]
+    pub expires_at_unix: Option<i64>,
+    #[serde(default)]
+    pub max_uses: i64,
+}
+
+/// The owner's own words (quote + telegram message id) that authorize the
+/// record. A permission without it is ignored by every consumer: the record
+/// set is only as trustworthy as the evidence it carries.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+pub struct OwnerPermissionEvidence {
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub msg_id: i64,
+    #[serde(default)]
+    pub quote: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OwnerPermissionUse {
+    pub id: i64,
+    pub subject: String,
+    pub target: String,
+    pub action: String,
+    pub used: i64,
+    pub max_uses: i64,
+    pub at_unix: i64,
+}
+
+/// A record counts only with the owner's quoted words and their message id.
+fn owner_evidence_present(record: &OwnerPermissionRecord) -> bool {
+    record.evidence.by == "owner"
+        && record.evidence.msg_id > 0
+        && !record.evidence.quote.trim().is_empty()
+}
+
+/// Uses already consumed per permission id, counted from the side journal —
+/// the mirror stays untouched (one writer per file).
+fn permission_journal_uses(path: &Path) -> HashMap<i64, i64> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let mut counts: HashMap<i64, i64> = HashMap::new();
+    for line in raw.lines() {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(id) = value.get("id").and_then(serde_json::Value::as_i64) {
+                *counts.entry(id).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
+fn journal_permission_use(path: &Path, use_record: &OwnerPermissionUse) {
+    let line = match serde_json::to_string(use_record) {
+        Ok(line) => line,
+        Err(_) => return,
+    };
+    if std::fs::metadata(path).is_err() {
+        let _ = std::fs::write(path, b"");
+        let _ = std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path) {
+        use std::io::Write;
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+/// Consume one use of a live owner permission covering exactly these peers and
+/// this action, or `None` when nothing matches: the file is missing or
+/// malformed, the record carries no owner evidence, it expired or ran out of
+/// uses, or the peer/action pair is not listed. This is the ONLY path that can
+/// cover a denied peer (@BotFather): the record must name that peer
+/// explicitly and carry the owner's quoted words; absent evidence every card
+/// stays mandatory. Honest limits of the mirror: expiry is enforced here, and
+/// revocation reaches this consumer only through the next orch export — the
+/// export happens on grant/revoke and on every orch permissions tick.
+pub fn consume_owner_permission(
+    path: &Path,
+    peers: &[&str],
+    action: &str,
+    now_unix: i64,
+) -> Option<OwnerPermissionUse> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let file: OwnerPermissionsFile = serde_json::from_str(&raw).ok()?;
+    let journal = path.with_extension("json.log");
+    let counts = permission_journal_uses(&journal);
+    let wanted: Vec<String> = peers
+        .iter()
+        .filter(|peer| !peer.trim().is_empty())
+        .map(|peer| normalize_peer(peer))
+        .collect();
+    if wanted.is_empty() {
+        return None;
+    }
+    for record in &file.permissions {
+        if !owner_evidence_present(record) {
+            continue;
+        }
+        if let Some(expires) = record.expires_at_unix {
+            if now_unix >= expires {
+                continue;
+            }
+        }
+        let used = counts.get(&record.id).copied().unwrap_or(0);
+        if record.max_uses > 0 && used >= record.max_uses {
+            continue;
+        }
+        if !record.actions.is_empty()
+            && !record
+                .actions
+                .iter()
+                .any(|allowed| normalize_peer(allowed) == normalize_peer(action))
+        {
+            continue;
+        }
+        let target = record.peers.iter().find(|allowed| {
+            let candidate = normalize_peer(allowed);
+            wanted.iter().any(|wanted| wanted == &candidate)
+        });
+        let Some(target) = target else {
+            continue;
+        };
+        let use_record = OwnerPermissionUse {
+            id: record.id,
+            subject: record.subject.clone(),
+            target: target.clone(),
+            action: action.to_string(),
+            used: used + 1,
+            max_uses: record.max_uses,
+            at_unix: now_unix,
+        };
+        journal_permission_use(&journal, &use_record);
+        return Some(use_record);
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6493,6 +6671,97 @@ mod tests {
         // and must not be covered.
         write_grant(&path, &live_grant(&["alex"]));
         assert!(consume_owner_grant(&path, &["@alexandra"], 5_000).is_none());
+    }
+
+    fn live_permission(id: i64, peers: &[&str], actions: &[&str]) -> OwnerPermissionRecord {
+        OwnerPermissionRecord {
+            id,
+            subject: "telegram-bot-migrate-agi-work-bot".to_string(),
+            title: "Переезд на прежнего бота".to_string(),
+            peers: peers.iter().map(|peer| (*peer).to_string()).collect(),
+            actions: actions.iter().map(|action| (*action).to_string()).collect(),
+            evidence: OwnerPermissionEvidence {
+                by: "owner".to_string(),
+                msg_id: 1107,
+                quote: "его разблокировали, разморозили".to_string(),
+            },
+            expires_at_unix: Some(20_000),
+            max_uses: 5,
+        }
+    }
+
+    fn write_permissions(path: &std::path::Path, records: &[OwnerPermissionRecord]) {
+        let file =
+            OwnerPermissionsFile { v: 1, generated_at_unix: 1_000, permissions: records.to_vec() };
+        std::fs::write(path, serde_json::to_vec_pretty(&file).expect("permissions json"))
+            .expect("write permissions");
+    }
+
+    #[test]
+    fn owner_permission_without_owner_evidence_is_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("owner-permissions.json");
+        let mut record = live_permission(7, &["93372553", "BotFather"], &["press_button"]);
+        record.evidence.quote = "   ".to_string();
+        write_permissions(&path, &[record.clone()]);
+        assert!(
+            consume_owner_permission(&path, &["BotFather"], "press_button", 5_000).is_none(),
+            "a record without the owner's words must cover nothing"
+        );
+        record.evidence.quote = "его разблокировали, разморозили".to_string();
+        record.evidence.by = "orch".to_string();
+        write_permissions(&path, &[record]);
+        assert!(
+            consume_owner_permission(&path, &["BotFather"], "press_button", 5_000).is_none(),
+            "only the owner's own message is evidence"
+        );
+    }
+
+    #[test]
+    fn owner_permission_covers_a_named_denied_peer_and_journals_the_use() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("owner-permissions.json");
+        write_permissions(&path, &[live_permission(7, &["@BotFather"], &["press_button"])]);
+        // The send path passes the target's several spellings; the record names
+        // the denied peer explicitly, so the card is covered.
+        let use_record =
+            consume_owner_permission(&path, &["93372553", "BotFather"], "press_button", 5_000)
+                .expect("a named peer with owner evidence must be covered");
+        assert_eq!(use_record.id, 7);
+        assert_eq!(use_record.used, 1);
+        assert_eq!(use_record.target, "@BotFather");
+        // A peer the record does not name stays uncovered in the same file.
+        assert!(
+            consume_owner_permission(&path, &["@someone_else"], "press_button", 5_000).is_none()
+        );
+        // The mirror is read-only for the consumer; uses land in the journal.
+        let journal = std::fs::read_to_string(path.with_extension("json.log")).expect("journal");
+        assert_eq!(journal.lines().count(), 1, "one use, one journal line");
+        let mirror = std::fs::read_to_string(&path).expect("mirror");
+        assert!(mirror.contains("@BotFather"), "the mirror must stay untouched by consumers");
+    }
+
+    #[test]
+    fn owner_permission_honours_expiry_use_limit_and_actions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("owner-permissions.json");
+        let mut expired = live_permission(9, &["BotFather"], &["press_button"]);
+        expired.expires_at_unix = Some(4_000);
+        write_permissions(&path, &[expired]);
+        assert!(consume_owner_permission(&path, &["BotFather"], "press_button", 5_000).is_none());
+        let mut single_use = live_permission(10, &["BotFather"], &["press_button"]);
+        single_use.max_uses = 1;
+        write_permissions(&path, &[single_use]);
+        assert!(consume_owner_permission(&path, &["BotFather"], "press_button", 5_000).is_some());
+        assert!(
+            consume_owner_permission(&path, &["BotFather"], "press_button", 5_000).is_none(),
+            "the journal count exhausts max_uses"
+        );
+        write_permissions(&path, &[live_permission(11, &["BotFather"], &["send_message"])]);
+        assert!(
+            consume_owner_permission(&path, &["BotFather"], "press_button", 5_000).is_none(),
+            "an action outside the record's list is not covered"
+        );
     }
 
     fn sample_send_approval(state: SendApprovalState) -> SendApproval {

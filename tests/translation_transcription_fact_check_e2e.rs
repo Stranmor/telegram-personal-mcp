@@ -103,6 +103,7 @@ async fn translation_transcription_and_fact_checks_are_approval_bound_and_recove
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
             owner_grant_file: None,
+            owner_permission_file: None,
         },
         bot.clone(),
     )

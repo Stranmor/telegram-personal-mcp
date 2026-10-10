@@ -13492,79 +13492,108 @@ impl McpServer {
         ) {
             return Ok(Json(ToolOutcome::success(request.public)));
         }
-        // Owner grant: the owner authorized this host in an interactive chat
-        // ("да, отправляй"). The card is skipped only for the exact peers and
-        // the message budget he granted, the permission expires on its own and
-        // every use is journalled; with no live grant this path is unchanged.
-        if let Some(path) = runtime.policy.owner_grant_file.as_deref() {
-            let peers = [
-                prepared.public.chat_id.as_str(),
-                prepared.public.target.username.as_deref().unwrap_or(""),
-                prepared.public.target.display_name.as_str(),
-            ];
-            if let Some(grant_use) = crate::approval::consume_owner_grant(path, &peers, now_unix())
-            {
-                tracing::info!(
+        // Owner grant + durable owner permissions (#1598): the owner authorized
+        // this host or peer in words ("да, отправляй" / "мигрируем на
+        // прежнего бота"). The card is skipped only for the exact peers a live
+        // record names; the grant's budget/expiry and the permission's
+        // evidence/expiry/use-limit are enforced inside the consumers, and
+        // every use is journalled. With no matching record this path is
+        // unchanged.
+        let peers = [
+            prepared.public.chat_id.as_str(),
+            prepared.public.target.username.as_deref().unwrap_or(""),
+            prepared.public.target.display_name.as_str(),
+        ];
+        let coverage = runtime
+            .policy
+            .owner_grant_file
+            .as_deref()
+            .and_then(|path| {
+                crate::approval::consume_owner_grant(path, &peers, now_unix()).map(CoveredBy::Grant)
+            })
+            .or_else(|| {
+                runtime.policy.owner_permission_file.as_deref().and_then(|path| {
+                    crate::approval::consume_owner_permission(
+                        path,
+                        &peers,
+                        "send_message",
+                        now_unix(),
+                    )
+                    .map(CoveredBy::Permission)
+                })
+            });
+        if let Some(coverage) = coverage {
+            match &coverage {
+                CoveredBy::Grant(grant_use) => tracing::info!(
                     target: "telegram_personal_mcp",
                     target = %grant_use.target,
                     remaining_messages = grant_use.remaining_messages,
                     granted_by = grant_use.granted_by,
                     "owner grant covered this send; approval card skipped"
-                );
-                self.send_ledger
-                    .mark_approval_card_skipped(&request.public.approval_id)
-                    .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
-                let claimed = self
-                    .send_ledger
-                    .mark_approval_sending(&request.public.approval_id, now_unix())
-                    .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
-                if !claimed {
-                    // Never silently drop a `false`: the approval left the
-                    // pending window (expired, cancelled, or already claimed).
-                    // A sent/in-flight receipt is returned without a second
-                    // send; anything else is an honest, non-retryable refusal.
-                    let current = self
-                        .send_ledger
-                        .get_approval(&request.public.approval_id)
-                        .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?
-                        .ok_or_else(|| {
-                            Json(ToolOutcome::failure(ToolFailure::new(
-                                "APPROVAL_NOT_FOUND",
-                                "approval disappeared after its card was skipped",
-                                false,
-                            )))
-                        })?;
-                    if matches!(
-                        current.state,
-                        SendApprovalState::Sent
-                            | SendApprovalState::Sending
-                            | SendApprovalState::DeliveryUncertain
-                    ) {
-                        return Ok(Json(ToolOutcome::success(current)));
-                    }
-                    return Err(Json(ToolOutcome::failure(ToolFailure::new(
-                        "APPROVAL_NOT_SENDABLE",
-                        format!(
-                            "owner grant cannot send approval {} from state {:?}: only a pending approval can enter sending",
-                            current.approval_id, current.state
-                        ),
-                        false,
-                    ))));
-                }
-                // The snapshot captured before the transition still says
-                // dispatching_card; the send path requires the reloaded sending
-                // state, the same way a granted mutation reloads applying.
-                let sending = self
-                    .reload_approval(&request.public.approval_id)
-                    .map_err(|error| Json(ToolOutcome::failure(error)))?;
-                self.complete_approval_send(runtime, sending)
-                    .await
-                    .map_err(|error| Json(ToolOutcome::failure(error)))?;
-                let final_state = self
-                    .reload_approval(&request.public.approval_id)
-                    .map_err(|error| Json(ToolOutcome::failure(error)))?;
-                return Ok(Json(ToolOutcome::success(final_state)));
+                ),
+                CoveredBy::Permission(permission) => tracing::info!(
+                    target: "telegram_personal_mcp",
+                    permission_id = permission.id,
+                    subject = %permission.subject,
+                    target = %permission.target,
+                    used = permission.used,
+                    max_uses = permission.max_uses,
+                    "owner permission covered this send; approval card skipped"
+                ),
             }
+            self.send_ledger
+                .mark_approval_card_skipped(&request.public.approval_id)
+                .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
+            let claimed = self
+                .send_ledger
+                .mark_approval_sending(&request.public.approval_id, now_unix())
+                .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
+            if !claimed {
+                // Never silently drop a `false`: the approval left the
+                // pending window (expired, cancelled, or already claimed).
+                // A sent/in-flight receipt is returned without a second
+                // send; anything else is an honest, non-retryable refusal.
+                let current = self
+                    .send_ledger
+                    .get_approval(&request.public.approval_id)
+                    .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?
+                    .ok_or_else(|| {
+                        Json(ToolOutcome::failure(ToolFailure::new(
+                            "APPROVAL_NOT_FOUND",
+                            "approval disappeared after its card was skipped",
+                            false,
+                        )))
+                    })?;
+                if matches!(
+                    current.state,
+                    SendApprovalState::Sent
+                        | SendApprovalState::Sending
+                        | SendApprovalState::DeliveryUncertain
+                ) {
+                    return Ok(Json(ToolOutcome::success(current)));
+                }
+                return Err(Json(ToolOutcome::failure(ToolFailure::new(
+                    "APPROVAL_NOT_SENDABLE",
+                    format!(
+                        "a cardless authorization cannot send approval {} from state {:?}: only a pending approval can enter sending",
+                        current.approval_id, current.state
+                    ),
+                    false,
+                ))));
+            }
+            // The snapshot captured before the transition still says
+            // dispatching_card; the send path requires the reloaded sending
+            // state, the same way a granted mutation reloads applying.
+            let sending = self
+                .reload_approval(&request.public.approval_id)
+                .map_err(|error| Json(ToolOutcome::failure(error)))?;
+            self.complete_approval_send(runtime, sending)
+                .await
+                .map_err(|error| Json(ToolOutcome::failure(error)))?;
+            let final_state = self
+                .reload_approval(&request.public.approval_id)
+                .map_err(|error| Json(ToolOutcome::failure(error)))?;
+            return Ok(Json(ToolOutcome::success(final_state)));
         }
         if !request.should_dispatch_card {
             return Ok(Json(ToolOutcome::success(request.public)));
@@ -15349,58 +15378,89 @@ impl McpServer {
             }
             return Ok(Json(ToolOutcome::success(current)));
         }
-        // Owner grant also covers mutations (file sends, edits, deletes): the
-        // owner authorized exactly these peers, the budget and the window, and
-        // every use is journalled. External-owner mutations are relayed the
-        // same way a card press would relay them; nothing else changes.
-        if let Some(path) = runtime.policy.owner_grant_file.as_deref() {
-            let peers = mutation_grant_peers(&request.public.action);
-            if peers.is_empty() {
-                tracing::warn!(
-                    target: "telegram_personal_mcp",
-                    action = %serde_json::to_string(&request.public.action).unwrap_or_default(),
-                    "owner grant: no peer-shaped field in the mutation action; card stays mandatory"
-                );
-            }
-            let peer_refs: Vec<&str> = peers.iter().map(String::as_str).collect();
-            if !peer_refs.is_empty() {
-                if let Some(grant_use) =
+        // Owner grant and durable owner permissions (#1598) also cover
+        // mutations (file sends, edits, deletes): the record must name a peer
+        // present in the action; the budget/window (grant) and
+        // evidence/expiry/use-limit (permission) are enforced inside the
+        // consumers and every use is journalled. External-owner mutations are
+        // relayed the same way a card press would relay them; nothing else
+        // changes.
+        let mutation_peers = mutation_grant_peers(&request.public.action);
+        if mutation_peers.is_empty() {
+            tracing::warn!(
+                target: "telegram_personal_mcp",
+                action = %serde_json::to_string(&request.public.action).unwrap_or_default(),
+                "no peer-shaped field in the mutation action; card stays mandatory"
+            );
+        }
+        let peer_refs: Vec<&str> = mutation_peers.iter().map(String::as_str).collect();
+        let coverage = if peer_refs.is_empty() {
+            None
+        } else {
+            runtime
+                .policy
+                .owner_grant_file
+                .as_deref()
+                .and_then(|path| {
                     crate::approval::consume_owner_grant(path, &peer_refs, now_unix())
-                {
-                    tracing::info!(
-                        target: "telegram_personal_mcp",
-                        target = %grant_use.target,
-                        remaining_messages = grant_use.remaining_messages,
-                        granted_by = grant_use.granted_by,
-                        "owner grant covered this mutation; approval card skipped"
-                    );
-                    self.mutation_ledger
-                        .mark_approval_card_skipped(&request.public.approval_id)
-                        .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
-                    if request.public.execution_owner == MutationExecutionOwner::ExternalOwner {
-                        self.mutation_ledger
-                            .mark_external_owner_approved(&request.public.approval_id, now_unix())
-                            .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
-                    } else {
-                        self.mutation_ledger
-                            .mark_approval_applying(&request.public.approval_id, now_unix())
-                            .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
-                        // The application path requires the reloaded state: the
-                        // snapshot captured before the transition still says
-                        // Pending, and applying from it fails with a retry error.
-                        let applying = self
-                            .reload_mutation_approval(&request.public.approval_id)
-                            .map_err(|error| Json(ToolOutcome::failure(error)))?;
-                        self.complete_mutation_application(runtime, applying)
-                            .await
-                            .map_err(|error| Json(ToolOutcome::failure(error)))?;
-                    }
-                    let final_state = self
-                        .reload_mutation_approval(&request.public.approval_id)
-                        .map_err(|error| Json(ToolOutcome::failure(error)))?;
-                    return Ok(Json(ToolOutcome::success(final_state)));
-                }
+                        .map(CoveredBy::Grant)
+                })
+                .or_else(|| {
+                    runtime.policy.owner_permission_file.as_deref().and_then(|path| {
+                        crate::approval::consume_owner_permission(
+                            path,
+                            &peer_refs,
+                            &mutation_action_label(&request.public.action),
+                            now_unix(),
+                        )
+                        .map(CoveredBy::Permission)
+                    })
+                })
+        };
+        if let Some(coverage) = coverage {
+            match &coverage {
+                CoveredBy::Grant(grant_use) => tracing::info!(
+                    target: "telegram_personal_mcp",
+                    target = %grant_use.target,
+                    remaining_messages = grant_use.remaining_messages,
+                    granted_by = grant_use.granted_by,
+                    "owner grant covered this mutation; approval card skipped"
+                ),
+                CoveredBy::Permission(permission) => tracing::info!(
+                    target: "telegram_personal_mcp",
+                    permission_id = permission.id,
+                    subject = %permission.subject,
+                    target = %permission.target,
+                    used = permission.used,
+                    max_uses = permission.max_uses,
+                    "owner permission covered this mutation; approval card skipped"
+                ),
             }
+            self.mutation_ledger
+                .mark_approval_card_skipped(&request.public.approval_id)
+                .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
+            if request.public.execution_owner == MutationExecutionOwner::ExternalOwner {
+                self.mutation_ledger
+                    .mark_external_owner_approved(&request.public.approval_id, now_unix())
+                    .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
+            } else {
+                self.mutation_ledger
+                    .mark_approval_applying(&request.public.approval_id, now_unix())
+                    .map_err(|error| Json(ToolOutcome::failure(ledger_failure(error))))?;
+                // The application path requires the reloaded state: the
+                // snapshot captured before the transition still says
+                // Pending, and applying from it fails with a retry error.
+                let applying = self
+                    .reload_mutation_approval(&request.public.approval_id)
+                    .map_err(|error| Json(ToolOutcome::failure(error)))?;
+                self.complete_mutation_application(runtime, applying)
+                    .await
+                    .map_err(|error| Json(ToolOutcome::failure(error)))?;
+            }
+            let final_state = self
+                .reload_mutation_approval(&request.public.approval_id)
+                .map_err(|error| Json(ToolOutcome::failure(error)))?;
+            return Ok(Json(ToolOutcome::success(final_state)));
         }
         if !request.should_dispatch_card {
             return Ok(Json(ToolOutcome::success(request.public)));
@@ -38463,6 +38523,24 @@ mod tests {
             "STATE_INTEGRITY_ERROR"
         );
     }
+}
+
+/// Which live record let a dispatch skip its confirmation card (#1598):
+/// the interactive owner grant, or a durable, evidence-backed owner
+/// permission exported by orch. Only the label for the log line differs.
+enum CoveredBy {
+    Grant(crate::approval::OwnerGrantUse),
+    Permission(crate::approval::OwnerPermissionUse),
+}
+
+/// Durable permissions declare actions by name (`send_message`,
+/// `press_button`, …); a mutation action serializes as a nested variant, so
+/// its label is the outermost key of that serialization.
+fn mutation_action_label(action: &MutationAction) -> String {
+    serde_json::to_value(action)
+        .ok()
+        .and_then(|value| value.as_object().and_then(|map| map.keys().next().cloned()))
+        .unwrap_or_default()
 }
 
 /// Peer candidates for a mutation: exactly the target peer read from the

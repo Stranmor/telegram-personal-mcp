@@ -135,6 +135,7 @@ async fn inline_bot_query_and_send_are_typed_short_lived_and_idempotently_recove
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
             owner_grant_file: None,
+            owner_permission_file: None,
         },
         bot.clone(),
     )

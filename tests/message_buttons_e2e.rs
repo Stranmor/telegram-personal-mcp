@@ -134,6 +134,7 @@ async fn message_buttons_are_typed_approval_bound_and_never_blindly_replayed() -
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
             owner_grant_file: None,
+            owner_permission_file: None,
         },
         bot.clone(),
     )

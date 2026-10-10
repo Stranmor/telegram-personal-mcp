@@ -116,6 +116,7 @@ async fn chat_lifecycle_and_settings_are_e2e_exact_and_idempotent() -> anyhow::R
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
             owner_grant_file: None,
+            owner_permission_file: None,
         },
         bot.clone(),
     )

@@ -129,6 +129,7 @@ async fn voice_and_video_note_are_byte_validated_thread_bound_and_exactly_once()
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
             owner_grant_file: None,
+            owner_permission_file: None,
         },
         bot.clone(),
     )

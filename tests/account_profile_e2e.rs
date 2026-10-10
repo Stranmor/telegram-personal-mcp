@@ -116,6 +116,7 @@ async fn account_profile_lifecycle_is_e2e_validated_and_idempotent() -> anyhow::
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
             owner_grant_file: None,
+            owner_permission_file: None,
         },
         bot.clone(),
     )

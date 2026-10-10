@@ -195,6 +195,7 @@ async fn profile_colors_and_personal_channel_are_exact_readback_bound_and_recove
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
             owner_grant_file: None,
+            owner_permission_file: None,
         },
         bot.clone(),
     )

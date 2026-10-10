@@ -103,6 +103,7 @@ async fn saved_messages_reads_and_mutations_are_typed_and_recover_from_lost_rece
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
             owner_grant_file: None,
+            owner_permission_file: None,
         },
         bot.clone(),
     )

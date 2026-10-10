@@ -109,6 +109,7 @@ async fn rich_media_catalog_validation_approval_readback_and_recovery_are_e2e() 
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
             owner_grant_file: None,
+            owner_permission_file: None,
         },
         bot.clone(),
     )

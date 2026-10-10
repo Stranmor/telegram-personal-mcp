@@ -612,6 +612,32 @@ fn approval_from_env() -> Result<Option<(ApprovalPolicy, Arc<dyn ApprovalBot>)>>
     let proxy = nonempty_env("TELEGRAM_MCP_PROXY");
     let owner_grant_file =
         nonempty_env("TELEGRAM_MCP_OWNER_GRANT_FILE").map(std::path::PathBuf::from);
+    let owner_permission_file =
+        nonempty_env("TELEGRAM_MCP_OWNER_PERMISSION_FILE").map(std::path::PathBuf::from);
+    if let Some(path) = &owner_permission_file {
+        // Absent, unreadable or evidence-less records never open a card path:
+        // the consumer refuses them, and this line is the visible trace that
+        // the permission mirror is (or is not) in play (#1598).
+        match std::fs::read_to_string(path).ok().and_then(|raw| {
+            serde_json::from_str::<telegram_personal_mcp::approval::OwnerPermissionsFile>(&raw).ok()
+        }) {
+            Some(file) => tracing::info!(
+                target: "telegram_personal_mcp",
+                records = file.permissions.len(),
+                generated_at_unix = file.generated_at_unix,
+                "owner permission mirror loaded: evidence-backed records cover their listed peers without a card"
+            ),
+            None => tracing::info!(
+                target: "telegram_personal_mcp",
+                "owner permission mirror present but unreadable or malformed; approval cards stay mandatory"
+            ),
+        }
+    } else {
+        tracing::info!(
+            target: "telegram_personal_mcp",
+            "owner permission mirror not configured; approval cards stay mandatory"
+        );
+    }
     if let Some(path) = &owner_grant_file {
         match std::fs::read_to_string(path)
             .ok()
@@ -645,6 +671,7 @@ fn approval_from_env() -> Result<Option<(ApprovalPolicy, Arc<dyn ApprovalBot>)>>
         ttl_seconds,
         poll_timeout_seconds,
         owner_grant_file,
+        owner_permission_file,
     };
     policy.validate().map_err(anyhow::Error::msg)?;
     let bot: Arc<dyn ApprovalBot> =

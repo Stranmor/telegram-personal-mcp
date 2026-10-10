@@ -160,6 +160,7 @@ async fn business_chat_links_are_typed_private_and_recover_without_duplicate_act
             ttl_seconds: 3_600,
             poll_timeout_seconds: 1,
             owner_grant_file: None,
+            owner_permission_file: None,
         },
         bot.clone(),
     )
