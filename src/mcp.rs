@@ -38079,6 +38079,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mutation_action_label_uses_the_serde_kind_not_the_first_key() {
+        // The enum is internally tagged (`{"kind": …, …}`): reading the first
+        // object key would yield "kind" and silently disable owner-permission
+        // coverage for every mutation (#1598 live probe regression).
+        let action = MutationAction::PressCallbackButton {
+            button: CallbackButtonSnapshot {
+                chat_id: "93372553".to_string(),
+                message_id: 398_630,
+                message_date_unix: 1_791_415_650,
+                row: 1,
+                column: 1,
+                index: 3,
+                label: "@AGI_work_bot".to_string(),
+                callback_data_sha256: "3f9baa15".to_string(),
+                callback_data_length: 15,
+            },
+        };
+        assert_eq!(mutation_action_label(&action), "press_callback_button");
+    }
+
+    #[test]
     fn media_caption_validation_has_no_artificial_length_ceiling() {
         let long_caption = "текст ".repeat(2_000);
         assert!(long_caption.encode_utf16().count() > 2_048);
@@ -38534,12 +38555,15 @@ enum CoveredBy {
 }
 
 /// Durable permissions declare actions by name (`send_message`,
-/// `press_button`, …); a mutation action serializes as a nested variant, so
-/// its label is the outermost key of that serialization.
+/// `press_callback_button`, …); the mutation action serializes as an
+/// internally-tagged variant (`{"kind":"press_callback_button", …}`), so its
+/// label is the `kind` value — the vocabulary the owner records use.
 fn mutation_action_label(action: &MutationAction) -> String {
     serde_json::to_value(action)
         .ok()
-        .and_then(|value| value.as_object().and_then(|map| map.keys().next().cloned()))
+        .and_then(|value| {
+            value.get("kind").and_then(serde_json::Value::as_str).map(str::to_string)
+        })
         .unwrap_or_default()
 }
 
