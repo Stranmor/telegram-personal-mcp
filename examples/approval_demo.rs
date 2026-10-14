@@ -171,6 +171,12 @@ async fn main() -> anyhow::Result<()> {
                 json!({
                     "chat_id": DEMO_CHAT_REF,
                     "text": REPLY_TEXT,
+                    "source": {
+                        "kind": "telegram_message",
+                        "relation": "reply_context",
+                        "chat_id": DEMO_CHAT_REF,
+                        "message_id": SOURCE_MESSAGE_ID_I32
+                    },
                     "reply_to_message_id": source_message_id
                 })
                 .as_object()
