@@ -45,6 +45,14 @@ and releases use [Semantic Versioning](https://semver.org/).
   `TELEGRAM_MCP_MESSAGE_CACHE_POLL_INTERVAL_SECS` (default unchanged: 2 s).
 
 ### Fixed
+- Approval cards name the recipient as a clickable contact instead of a bare
+  numeric peer id: a username becomes a profile link
+  (`https://t.me/<username>`), a user or bot without a username becomes a
+  `tg://user?id=<id>` link carrying the resolved name, and a chat without
+  either keeps its human title. The operator can open the contact and check it
+  before approving. Covers the send, scheduled-message, scheduled-file, file
+  and story card renderers; the file and story cards now resolve the
+  destination identity for the same reason.
 - The owner grant can no longer skip the approval card for `@BotFather`
   (id `93372553`) in any normalised form — including a grant file written
   directly by hand — and a mutation grant is matched against the exact target
