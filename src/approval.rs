@@ -1368,20 +1368,14 @@ fn render_card(card: &ApprovalCard) -> Result<String, ApprovalBotError> {
             ("⚠️ <b>Не удалось завершить запрос</b>", "Сообщение не считается отправленным.")
         },
     };
-    let display_name = escape_html(&approval.target.display_name);
-    let username = approval
-        .target
-        .username
-        .as_deref()
-        .filter(|username| !username.trim().is_empty())
-        .map(|username| format!(" · @{}", escape_html(username.trim_start_matches('@'))))
-        .unwrap_or_default();
-    let destination_detail = if approval.target.kind == "saved_messages" {
-        String::new()
-    } else if username.is_empty() {
-        format!("\n<code>{}</code>", escape_html(&approval.chat_id))
+    let contact = if approval.target.kind == "saved_messages" {
+        format!("<b>{}</b>", escape_html(&approval.target.display_name))
     } else {
-        String::new()
+        chat_contact_html(
+            &approval.chat_id,
+            Some(&approval.target.display_name),
+            approval.target.username.as_deref(),
+        )
     };
     let reply_detail = approval
         .reply_to_message_id
@@ -1400,7 +1394,7 @@ fn render_card(card: &ApprovalCard) -> Result<String, ApprovalBotError> {
         String::new()
     };
     let text = format!(
-        "{title}\n\n<b>{display_name}</b>{username}{destination_detail}{source_detail}\n\n<blockquote>{}</blockquote>{reply_detail}{format_detail}\n\n{note}{receipt_detail}",
+        "{title}\n\n{contact}{source_detail}\n\n<blockquote>{}</blockquote>{reply_detail}{format_detail}\n\n{note}{receipt_detail}",
         escape_html(&approval.text),
     );
     if text.encode_utf16().count() > MAX_APPROVAL_CARD_UTF16 {
@@ -2282,6 +2276,7 @@ fn is_no_text_edit_error(error: &ApprovalBotError) -> bool {
 fn render_send_file_card(
     approval: &MutationApproval,
     chat_id: &str,
+    chat_label: Option<&MutationChatLabel>,
     artifact: &crate::domain::MutationFileArtifact,
     caption: &str,
     mode: crate::domain::FileSendMode,
@@ -2340,8 +2335,13 @@ fn render_send_file_card(
     let context = mutation_human_context_html(approval);
     let consequences = mutation_consequences_html(approval);
     let rendered = format!(
-        "{title}{context}\n\n<b>Куда:</b> <code>{}</code>\n<b>Что:</b> {} · <code>{}</code> · {}{reply_detail}\n<b>Подпись ({caption_len} знаков):</b>\n<blockquote>{}</blockquote>\n🔐 <code>{}…</code>\n\n{note}{receipt_detail}{consequences}",
-        escape_html(chat_id),
+        "{title}{context}\n\n<b>Куда:</b> {}\n<b>Что:</b> {} · <code>{}</code> · {}{reply_detail}\n<b>Подпись ({caption_len} знаков):</b>\n<blockquote>{}</blockquote>\n🔐 <code>{}…</code>\n\n{note}{receipt_detail}{consequences}",
+        match chat_label {
+            Some(label) => {
+                chat_contact_html(&label.chat_id, label.title.as_deref(), label.username.as_deref())
+            },
+            None => chat_contact_html(chat_id, None, None),
+        },
         send_file_kind_label(mode),
         escape_html(&artifact.file_name),
         human_file_size(artifact.size_bytes),
@@ -2357,6 +2357,7 @@ fn render_send_file_card(
 fn render_send_story_card(
     approval: &MutationApproval,
     peer_ref: &str,
+    chat_label: Option<&MutationChatLabel>,
     artifact: &crate::domain::MutationFileArtifact,
     caption: &str,
     privacy: &crate::domain::StoryPrivacySpec,
@@ -2412,8 +2413,13 @@ fn render_send_story_card(
     let context = mutation_human_context_html(approval);
     let consequences = mutation_consequences_html(approval);
     let rendered = format!(
-        "{title}{context}\n\n<b>Куда:</b> <code>{}</code>\n<b>Кадр:</b> <code>{}</code> · {}\n<b>Видно:</b> {}\n<b>Время жизни:</b> {}\n<b>Подпись ({caption_len} знаков):</b>\n<blockquote>{}</blockquote>\n🔐 <code>{}…</code>\n\n{note}{receipt_detail}{consequences}",
-        escape_html(peer_ref),
+        "{title}{context}\n\n<b>Куда:</b> {}\n<b>Кадр:</b> <code>{}</code> · {}\n<b>Видно:</b> {}\n<b>Время жизни:</b> {}\n<b>Подпись ({caption_len} знаков):</b>\n<blockquote>{}</blockquote>\n🔐 <code>{}…</code>\n\n{note}{receipt_detail}{consequences}",
+        match chat_label {
+            Some(label) => {
+                chat_contact_html(&label.chat_id, label.title.as_deref(), label.username.as_deref())
+            },
+            None => chat_contact_html(peer_ref, None, None),
+        },
         escape_html(&artifact.file_name),
         human_file_size(artifact.size_bytes),
         escape_html(&story_visibility_label(privacy)),
@@ -2583,22 +2589,49 @@ fn moscow_datetime_label(timestamp_unix: i64) -> String {
     )
 }
 
+/// Clickable recipient contact for HTML approval cards. Telegram clients make
+/// a numeric id navigable only through a link, so the card never prints a bare
+/// id: a username becomes a profile link, a positive user id becomes a
+/// `tg://user` link, and a chat without either keeps its human title.
+fn chat_contact_html(chat_id: &str, name: Option<&str>, username: Option<&str>) -> String {
+    let name = name.map(str::trim).filter(|value| !value.is_empty());
+    let handle = username
+        .map(str::trim)
+        .map(|value| value.trim_start_matches('@'))
+        .filter(|value| !value.is_empty());
+    if let Some(handle) = handle {
+        let link = format!("https://t.me/{}", escape_html(handle));
+        return match name {
+            Some(name) => format!(
+                "<b><a href=\"{link}\">{}</a></b> · @{}",
+                escape_html(name),
+                escape_html(handle),
+            ),
+            None => format!("<b><a href=\"{link}\">@{}</a></b>", escape_html(handle)),
+        };
+    }
+    if let Some(user_id) = chat_id.parse::<i64>().ok().filter(|value| *value > 0) {
+        let label = name.map_or_else(|| format!("контакт {user_id}"), |value| value.to_string());
+        return format!("<b><a href=\"tg://user?id={user_id}\">{}</a></b>", escape_html(&label));
+    }
+    name.map_or_else(
+        || "<b>получатель не определён</b>".to_string(),
+        |name| format!("<b>{}</b>", escape_html(name)),
+    )
+}
+
 fn scheduled_target_html(chat_id: &str, target: Option<&PreparedSendTarget>) -> String {
-    let Some(target) = target else {
-        return format!("<code>{}</code>", escape_html(chat_id));
-    };
-    let username = target
-        .username
-        .as_deref()
-        .filter(|username| !username.trim().is_empty())
-        .map(|username| format!(" · @{}", escape_html(username.trim_start_matches('@'))))
-        .unwrap_or_default();
-    let fallback_id = if username.is_empty() && target.kind != "saved_messages" {
-        format!(" · <code>{}</code>", escape_html(chat_id))
-    } else {
-        String::new()
-    };
-    format!("<b>{}</b>{username}{fallback_id}", escape_html(&target.display_name))
+    match target {
+        Some(target) if target.kind == "saved_messages" => {
+            format!("<b>{}</b>", escape_html(&target.display_name))
+        },
+        Some(target) => chat_contact_html(
+            chat_id,
+            Some(&target.display_name),
+            target.username.as_deref(),
+        ),
+        None => chat_contact_html(chat_id, None, None),
+    }
 }
 
 fn telegram_source_html(source: &PreparedMessageSource) -> String {
@@ -2935,6 +2968,7 @@ fn render_mutation_card(card: &MutationApprovalCard) -> Result<String, ApprovalB
         return render_send_file_card(
             approval,
             chat_id,
+            card.chat_label.as_ref(),
             artifact,
             caption,
             *mode,
@@ -2953,6 +2987,7 @@ fn render_mutation_card(card: &MutationApprovalCard) -> Result<String, ApprovalB
         return render_send_story_card(
             approval,
             peer_ref,
+            card.chat_label.as_ref(),
             artifact,
             caption,
             privacy,
@@ -6953,7 +6988,9 @@ mod tests {
         let approval = sample_send_approval(SendApprovalState::Pending);
         let rendered = render_card(&ApprovalCard { approval: approval.clone() }).expect("card");
         assert!(rendered.starts_with("✉️ <b>Отправить сообщение?</b>"));
-        assert!(rendered.contains("<b>Example &lt;Recipient&gt;</b> · @example_recipient"));
+        assert!(rendered.contains(
+            "<b><a href=\"https://t.me/example_recipient\">Example &lt;Recipient&gt;</a></b> · @example_recipient"
+        ));
         assert!(rendered.contains(
             "🔎 <b>Источник:</b> <a href=\"https://example.test/projects/fixture-123\">Synthetic automation brief</a> · Example Marketplace"
         ));
@@ -6996,7 +7033,9 @@ mod tests {
         .expect("card");
 
         assert!(rendered.starts_with("<b>🗓 Запланировать сообщение?</b>"));
-        assert!(rendered.contains("👤 <b>Кому:</b> <b>Example Recipient</b> · @example_recipient"));
+        assert!(rendered.contains(
+            "👤 <b>Кому:</b> <b><a href=\"https://t.me/example_recipient\">Example Recipient</a></b> · @example_recipient"
+        ));
         assert!(rendered.contains(
             "🔎 <b>Источник:</b> <a href=\"https://t.me/example_jobs/1462\">Example Jobs · сообщение 1462</a>"
         ));
@@ -7145,7 +7184,9 @@ mod tests {
             "«✅ Опубликовать» — опубликовать сейчас, не ожидая решения по времени"
         ));
         assert!(rendered.contains("«❌ Отменить» — отклонить запрос; ничего не изменится."));
-        assert!(rendered.contains("<b>Куда:</b> <code>900000007</code>"));
+        assert!(rendered.contains(
+            "<b>Куда:</b> <b><a href=\"tg://user?id=900000007\">контакт 900000007</a></b>"
+        ));
         assert!(rendered.contains("<b>Что:</b> фото"));
         assert!(rendered.contains("<code>праздник-на-байкале.jpg</code>"));
         assert!(rendered.contains("1.5 МБ"));
@@ -7176,7 +7217,9 @@ mod tests {
         })
         .expect("card");
         assert!(rendered.starts_with("📸 <b>Публикация сторис</b>"));
-        assert!(rendered.contains("<b>Куда:</b> <code>900000009</code>"));
+        assert!(rendered.contains(
+            "<b>Куда:</b> <b><a href=\"tg://user?id=900000009\">контакт 900000009</a></b>"
+        ));
         assert!(rendered.contains("Кадр:"));
         assert!(rendered.contains("<code>кадр-иркутск.jpg</code>"));
         assert!(rendered.contains("2.0 МБ"));
@@ -7487,5 +7530,85 @@ mod tests {
             approval_proxy_url("https://proxy.example").expect_err("HTTP proxy must fail").code,
             "BOT_PROXY_INVALID"
         );
+    }
+}
+
+#[cfg(test)]
+mod recipient_contact_tests {
+    use super::*;
+
+    fn send_target(display_name: &str, username: Option<&str>, kind: &str) -> PreparedSendTarget {
+        PreparedSendTarget {
+            display_name: display_name.to_string(),
+            username: username.map(str::to_string),
+            kind: kind.to_string(),
+        }
+    }
+
+    #[test]
+    fn user_with_username_renders_as_profile_link() {
+        assert_eq!(
+            scheduled_target_html(
+                "1794330755",
+                Some(&send_target("Example Recipient", Some("example_recipient"), "user")),
+            ),
+            "<b><a href=\"https://t.me/example_recipient\">Example Recipient</a></b> · @example_recipient"
+        );
+    }
+
+    #[test]
+    fn user_without_username_renders_as_tg_user_link() {
+        let html = scheduled_target_html("1794330755", Some(&send_target("Папа", None, "user")));
+        assert_eq!(html, "<b><a href=\"tg://user?id=1794330755\">Папа</a></b>");
+        assert!(!html.contains("<code>"));
+    }
+
+    #[test]
+    fn bot_without_username_renders_as_tg_user_link() {
+        assert_eq!(
+            chat_contact_html("8580953884", Some("Heartbeat"), None),
+            "<b><a href=\"tg://user?id=8580953884\">Heartbeat</a></b>"
+        );
+    }
+
+    #[test]
+    fn channel_and_bot_with_username_render_as_profile_links() {
+        assert_eq!(
+            chat_contact_html("-1003309863896", Some("Hermes AI Test"), Some("hermes_ai_test")),
+            "<b><a href=\"https://t.me/hermes_ai_test\">Hermes AI Test</a></b> · @hermes_ai_test"
+        );
+        assert_eq!(
+            chat_contact_html("8995294722", Some("AGI"), Some("AGI_work_bot")),
+            "<b><a href=\"https://t.me/AGI_work_bot\">AGI</a></b> · @AGI_work_bot"
+        );
+    }
+
+    #[test]
+    fn channel_without_username_keeps_the_human_title_only() {
+        let html = chat_contact_html("-1003309863896", Some("Закрытый канал"), None);
+        assert_eq!(html, "<b>Закрытый канал</b>");
+        assert!(!html.contains("-1003309863896"));
+    }
+
+    #[test]
+    fn unresolved_recipient_still_links_a_user_id() {
+        assert_eq!(
+            scheduled_target_html("1794330755", None),
+            "<b><a href=\"tg://user?id=1794330755\">контакт 1794330755</a></b>"
+        );
+        assert_eq!(
+            scheduled_target_html("-1003309863896", None),
+            "<b>получатель не определён</b>"
+        );
+    }
+
+    #[test]
+    fn saved_messages_keeps_its_label_without_the_account_id() {
+        let html = scheduled_target_html(
+            "432567587",
+            Some(&send_target("Избранное", Some("stranmor"), "saved_messages")),
+        );
+        assert_eq!(html, "<b>Избранное</b>");
+        assert!(!html.contains("432567587"));
     }
 }

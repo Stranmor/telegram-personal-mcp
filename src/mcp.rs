@@ -31812,19 +31812,16 @@ impl McpServer {
     }
 
     /// Human chat identity for an approval card. Resolution failure is not a
-    /// card failure: the card then says the name is unavailable and keeps the
-    /// raw id next to it. Cards with their own human target names (scheduled
-    /// sends, file/story sends) skip the extra Telegram round-trip.
+    /// card failure: the card then falls back to a clickable `tg://user` link
+    /// or the raw peer. Scheduled sends carry their own human target name and
+    /// skip the extra Telegram round-trip.
     async fn resolve_mutation_chat_label(
         &self,
         action: &MutationAction,
     ) -> Option<MutationChatLabel> {
         if matches!(
             action,
-            MutationAction::ScheduleMessage { .. }
-                | MutationAction::ScheduleFile { .. }
-                | MutationAction::SendFile { .. }
-                | MutationAction::SendStory { .. }
+            MutationAction::ScheduleMessage { .. } | MutationAction::ScheduleFile { .. }
         ) {
             return None;
         }
