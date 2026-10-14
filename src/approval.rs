@@ -7012,6 +7012,21 @@ mod tests {
     }
 
     #[test]
+    fn send_card_without_username_renders_a_clickable_contact() {
+        let mut approval = sample_send_approval(SendApprovalState::Pending);
+        approval.chat_id = "1794330755".to_string();
+        approval.target.display_name = "Папа".to_string();
+        approval.target.username = None;
+        let rendered =
+            render_card(&ApprovalCard { approval: approval.clone() }).expect("card");
+        assert!(rendered.contains("Папа"));
+        assert!(rendered.contains("<b><a href=\"tg://user?id=1794330755\">Папа</a></b>"));
+        assert!(!rendered.contains("<code>1794330755</code>"));
+        let keyboard = keyboard_for(&approval);
+        assert_eq!(keyboard.inline_keyboard[0][0].text, "Отправить");
+    }
+
+    #[test]
     fn terminal_send_approval_card_has_no_live_buttons() {
         let mut approval = sample_send_approval(SendApprovalState::Sent);
         approval.target_message_id = Some(42);
