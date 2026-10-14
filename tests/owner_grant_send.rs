@@ -28,6 +28,7 @@ fn grant_policy(grant_path: std::path::PathBuf) -> ApprovalPolicy {
         ttl_seconds: 3_600,
         poll_timeout_seconds: 1,
         owner_grant_file: Some(grant_path),
+        owner_permission_file: None,
     }
 }
 
