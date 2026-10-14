@@ -63,12 +63,55 @@ fn is_database_busy(error: &rusqlite::Error) -> bool {
     )
 }
 
+/// How long the demo waits for the approval worker to move the card to `sent`.
+const SENT_WAIT: Duration = Duration::from_secs(60);
+
+/// Call one MCP tool, retrying the state store's bounded retryable failures.
+///
+/// A store write that loses the race for SQLite's write lock on a host stalled
+/// on I/O comes back as `STATE_STORE_ERROR` with `retryable: true`; the example
+/// is a client of that contract, so it retries instead of failing on host load.
+async fn call_tool(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    name: &'static str,
+    arguments: &Value,
+) -> anyhow::Result<rmcp::model::CallToolResult> {
+    const ATTEMPTS: usize = 6;
+    for attempt in 1..=ATTEMPTS {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new(name).with_arguments(
+                    arguments
+                        .as_object()
+                        .with_context(|| format!("{name} arguments"))?
+                        .clone(),
+                ),
+            )
+            .await?;
+        if result.is_error != Some(true) || attempt == ATTEMPTS || !is_retryable(&result) {
+            return Ok(result);
+        }
+        tokio::time::sleep(Duration::from_millis(200 * attempt as u64)).await;
+    }
+    unreachable!("the retry loop returns on its last attempt")
+}
+
+fn is_retryable(result: &rmcp::model::CallToolResult) -> bool {
+    result
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/error/retryable"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 async fn wait_for_sent(state_db_path: &std::path::Path, approval_id: &str) -> anyhow::Result<()> {
-    // One SQLite connection for the whole poll cycle: re-opening the ledger on
-    // every tick re-runs the schema bootstrap (a write lock) and fails with
-    // "database is locked" while the worker holds that lock on a busy host.
+    // One SQLite connection for the whole poll cycle, and a wall-clock deadline
+    // instead of a tick count: a host stalled on I/O delays the approval worker,
+    // and the demo must not turn that delay into a failure.
     let reader = open_state_reader(state_db_path).await?;
-    for _ in 0..100 {
+    let deadline = tokio::time::Instant::now() + SENT_WAIT;
+    while tokio::time::Instant::now() < deadline {
         if reader
             .get_approval(approval_id)?
             .is_some_and(|approval| approval.state == SendApprovalState::Sent)
@@ -77,7 +120,7 @@ async fn wait_for_sent(state_db_path: &std::path::Path, approval_id: &str) -> an
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    anyhow::bail!("approval did not reach sent state")
+    anyhow::bail!("approval did not reach sent state within {SENT_WAIT:?}")
 }
 
 #[tokio::main]
@@ -130,20 +173,16 @@ async fn main() -> anyhow::Result<()> {
     });
     let client = ().serve(client_transport).await?;
 
-    let dialogs = client
-        .call_tool(
-            CallToolRequestParams::new("search_dialogs").with_arguments(
-                json!({
-                    "query": "Project Room",
-                    "limit": 1,
-                    "scan_limit": 10
-                })
-                .as_object()
-                .context("dialog search arguments")?
-                .clone(),
-            ),
-        )
-        .await?;
+    let dialogs = call_tool(
+        &client,
+        "search_dialogs",
+        &json!({
+            "query": "Project Room",
+            "limit": 1,
+            "scan_limit": 10
+        }),
+    )
+    .await?;
     let dialogs_data = tool_data(&dialogs)?;
     ensure!(required_str(dialogs_data, "/matches/0/dialog/title")? == "Project Room");
     let dialog_chat_ref = required_str(dialogs_data, "/matches/0/dialog/chat_ref")?.to_string();
@@ -153,35 +192,27 @@ async fn main() -> anyhow::Result<()> {
     ensure!(dialog_canonical_chat_id == DEMO_CHAT_REF, "fixture canonical dialog identity changed");
     let dialog_scanned_count = required_i64(dialogs_data, "/scanned_count")?;
 
-    let search = client
-        .call_tool(
-            CallToolRequestParams::new("search_messages").with_arguments(
-                json!({ "chat_id": dialog_chat_ref, "query": "deploy", "limit": 10 })
-                    .as_object()
-                    .context("search arguments")?
-                    .clone(),
-            ),
-        )
-        .await?;
+    let search = call_tool(
+        &client,
+        "search_messages",
+        &json!({ "chat_id": dialog_chat_ref, "query": "deploy", "limit": 10 }),
+    )
+    .await?;
     let search_data = tool_data(&search)?;
     let source_message_id = required_i64(search_data, "/messages/0/message_id")?;
     ensure!(source_message_id == SOURCE_MESSAGE_ID, "fixture source message changed");
 
-    let context = client
-        .call_tool(
-            CallToolRequestParams::new("read_context").with_arguments(
-                json!({
-                    "chat_id": DEMO_CHAT_REF,
-                    "message_id": source_message_id,
-                    "before": 2,
-                    "after": 2
-                })
-                .as_object()
-                .context("context arguments")?
-                .clone(),
-            ),
-        )
-        .await?;
+    let context = call_tool(
+        &client,
+        "read_context",
+        &json!({
+            "chat_id": DEMO_CHAT_REF,
+            "message_id": source_message_id,
+            "before": 2,
+            "after": 2
+        }),
+    )
+    .await?;
     let context_data = tool_data(&context)?;
     ensure!(
         required_i64(context_data, "/target/message_id")? == source_message_id,
@@ -191,43 +222,35 @@ async fn main() -> anyhow::Result<()> {
     ensure!(required_str(context_data, "/target/sender_ref")? == "101");
     ensure!(required_str(context_data, "/older/0/text")? == CONTEXT_MESSAGE);
 
-    let prepared = client
-        .call_tool(
-            CallToolRequestParams::new("prepare_message").with_arguments(
-                json!({
-                    "chat_id": DEMO_CHAT_REF,
-                    "text": REPLY_TEXT,
-                    "source": {
-                        "kind": "telegram_message",
-                        "relation": "reply_context",
-                        "chat_id": DEMO_CHAT_REF,
-                        "message_id": SOURCE_MESSAGE_ID_I32
-                    },
-                    "reply_to_message_id": source_message_id
-                })
-                .as_object()
-                .context("prepare arguments")?
-                .clone(),
-            ),
-        )
-        .await?;
+    let prepared = call_tool(
+        &client,
+        "prepare_message",
+        &json!({
+            "chat_id": DEMO_CHAT_REF,
+            "text": REPLY_TEXT,
+            "source": {
+                "kind": "telegram_message",
+                "relation": "reply_context",
+                "chat_id": DEMO_CHAT_REF,
+                "message_id": SOURCE_MESSAGE_ID_I32
+            },
+            "reply_to_message_id": source_message_id
+        }),
+    )
+    .await?;
     let prepared_data = tool_data(&prepared)?;
     let draft_id = required_str(prepared_data, "/draft_id")?.to_string();
     let payload_sha256 = required_str(prepared_data, "/payload_sha256")?.to_string();
 
-    let bypass = client
-        .call_tool(
-            CallToolRequestParams::new("send_prepared").with_arguments(
-                json!({
-                    "draft_id": draft_id,
-                    "approved_payload_sha256": payload_sha256
-                })
-                .as_object()
-                .context("bypass arguments")?
-                .clone(),
-            ),
-        )
-        .await?;
+    let bypass = call_tool(
+        &client,
+        "send_prepared",
+        &json!({
+            "draft_id": draft_id,
+            "approved_payload_sha256": payload_sha256
+        }),
+    )
+    .await?;
     ensure!(bypass.is_error == Some(true), "direct send unexpectedly succeeded");
     ensure!(
         bypass
@@ -239,19 +262,15 @@ async fn main() -> anyhow::Result<()> {
         "direct send failed for an unexpected reason"
     );
 
-    let requested = client
-        .call_tool(
-            CallToolRequestParams::new("request_send_approval").with_arguments(
-                json!({
-                    "draft_id": draft_id,
-                    "approved_payload_sha256": payload_sha256
-                })
-                .as_object()
-                .context("approval arguments")?
-                .clone(),
-            ),
-        )
-        .await?;
+    let requested = call_tool(
+        &client,
+        "request_send_approval",
+        &json!({
+            "draft_id": draft_id,
+            "approved_payload_sha256": payload_sha256
+        }),
+    )
+    .await?;
     let requested_data = tool_data(&requested)?;
     ensure!(required_str(requested_data, "/state")? == "pending");
     let approval_id = required_str(requested_data, "/approval_id")?.to_string();
@@ -291,30 +310,23 @@ async fn main() -> anyhow::Result<()> {
     let delivery_count = backend.sent_messages().await.len();
     ensure!(delivery_count == 1, "duplicate callback created another delivery");
 
-    let status = client
-        .call_tool(CallToolRequestParams::new("get_send_approval").with_arguments(
-            json!({ "approval_id": approval_id }).as_object().context("status arguments")?.clone(),
-        ))
-        .await?;
+    let status =
+        call_tool(&client, "get_send_approval", &json!({ "approval_id": approval_id })).await?;
     let status_data = tool_data(&status)?;
     ensure!(required_str(status_data, "/state")? == "sent");
     let target_message_id = required_i64(status_data, "/target_message_id")?;
 
-    let readback = client
-        .call_tool(
-            CallToolRequestParams::new("read_context").with_arguments(
-                json!({
-                    "chat_id": DEMO_CHAT_REF,
-                    "message_id": target_message_id,
-                    "before": 1,
-                    "after": 1
-                })
-                .as_object()
-                .context("readback arguments")?
-                .clone(),
-            ),
-        )
-        .await?;
+    let readback = call_tool(
+        &client,
+        "read_context",
+        &json!({
+            "chat_id": DEMO_CHAT_REF,
+            "message_id": target_message_id,
+            "before": 1,
+            "after": 1
+        }),
+    )
+    .await?;
     let readback_data = tool_data(&readback)?;
     ensure!(required_i64(readback_data, "/target/message_id")? == target_message_id);
     ensure!(required_str(readback_data, "/target/text")? == REPLY_TEXT);

@@ -50,6 +50,10 @@ and releases use [Semantic Versioning](https://semver.org/).
   `TELEGRAM_MCP_MESSAGE_CACHE_POLL_INTERVAL_SECS` (default unchanged: 2 s).
 
 ### Fixed
+- The approval demo no longer turns a slow host into a failure: it waits for the
+  approval worker up to a wall-clock deadline instead of a fixed tick count, and
+  it retries the state store's `STATE_STORE_ERROR` answers that the store marks
+  `retryable`, like any other client of that contract.
 - Opening the state store no longer takes SQLite's write lock in the steady
   state: the `approval_runtime` seed row is inserted only when it is missing,
   instead of an unconditional `INSERT OR IGNORE` on every open. Every
