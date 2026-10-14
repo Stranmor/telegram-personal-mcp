@@ -687,6 +687,32 @@ impl SendLedger {
     }
 }
 
+/// One reusable state connection for a polling loop.
+///
+/// [`SendLedger`] is only a path handle: every method opens a fresh connection
+/// and runs the schema bootstrap, which writes on every open (the runtime row's
+/// `INSERT OR IGNORE` takes SQLite's write lock). A poll loop that re-reads
+/// through a new `SendLedger` therefore issues that write on every tick and
+/// fails with `database is locked` as soon as a slow host keeps the lock past
+/// the busy timeout. Open a reader once and reuse it for the whole cycle: in WAL
+/// mode the reads never contend with the writer being waited for.
+pub struct SendLedgerReader {
+    connection: Connection,
+}
+
+impl SendLedgerReader {
+    pub fn get_approval(&self, approval_id: &str) -> rusqlite::Result<Option<SendApproval>> {
+        get_approval_from_connection(&self.connection, approval_id)
+    }
+}
+
+impl SendLedger {
+    /// Open one reusable read connection for the rest of a polling cycle.
+    pub fn reader(&self) -> rusqlite::Result<SendLedgerReader> {
+        Ok(SendLedgerReader { connection: self.connection()? })
+    }
+}
+
 pub(crate) fn open_state_connection(path: &Path) -> rusqlite::Result<Connection> {
     if let Some(parent) = path.parent() {
         let create_private_parent = !parent.exists();
@@ -1422,6 +1448,49 @@ mod tests {
         let due = ledger.due_approval_recoveries(now, 10).expect("read rich recovery row");
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].kind, PreparedSendKind::RichMarkdown);
+    }
+
+    #[test]
+    fn reader_keeps_reading_while_a_writer_holds_the_write_lock() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("state.sqlite");
+        let ledger = SendLedger::new(path.clone());
+        let prepared = ledger
+            .prepare(
+                7,
+                "101".into(),
+                target("Alex"),
+                self_originated_source(),
+                "Hello".into(),
+                None,
+                "abc".into(),
+            )
+            .expect("prepare draft");
+        let approval = ledger
+            .create_or_get_approval(&prepared.public.draft_id, "abc", 700, 700, 3_600)
+            .expect("create approval");
+
+        // A poll loop opens its connection once and then keeps reading while the
+        // worker owns the write lock: the state a slow host produces, and the
+        // reason a per-tick reopen fails with "database is locked".
+        let reader = ledger.reader().expect("reader");
+        let writer = Connection::open(&path).expect("writer connection");
+        writer.execute_batch("BEGIN IMMEDIATE").expect("writer holds the write lock");
+        let observed = reader
+            .get_approval(&approval.public.approval_id)
+            .expect("read under a held write lock")
+            .expect("approval record");
+        assert_eq!(observed.state, SendApprovalState::DispatchingCard);
+
+        writer.execute_batch("COMMIT").expect("release the write lock");
+        ledger
+            .mark_approval_card_delivered(&approval.public.approval_id, 55)
+            .expect("bind approval card");
+        let delivered = reader
+            .get_approval(&approval.public.approval_id)
+            .expect("read after the write")
+            .expect("approval record");
+        assert_eq!(delivered.approval_message_id, Some(55));
     }
 
     #[cfg(unix)]

@@ -8,6 +8,13 @@ and releases use [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Added `SendLedger::reader()`, returning a reusable `SendLedgerReader` that
+  keeps one state connection for a whole polling cycle. `SendLedger` is only a
+  path handle, so every read opened a fresh connection and re-ran the schema
+  bootstrap, whose `INSERT OR IGNORE INTO approval_runtime` takes SQLite's write
+  lock; a poll loop that reopened per tick therefore failed with
+  `database is locked` as soon as a slow host held that lock past the busy
+  timeout, while WAL reads on a reused connection never contend with it.
 - Approval cards now carry the media they will publish: a mutation card whose
   action owns a local artifact is sent as a native Telegram media message
   (`sendPhoto`/`sendVideo`/`sendAnimation`/`sendVoice`/`sendDocument`) with the

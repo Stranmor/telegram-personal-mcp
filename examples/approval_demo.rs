@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use telegram_personal_mcp::{
     ApprovalAction, ApprovalPolicy, FakeApprovalBot, FakeTelegramBackend, McpServer,
-    McpServerSettings, SendApprovalState, SendLedger,
+    McpServerSettings, SendApprovalState, SendLedger, SendLedgerReader,
 };
 
 const APPROVAL_CHAT_ID: i64 = 700;
@@ -41,9 +41,35 @@ fn required_i64(value: &Value, pointer: &str) -> anyhow::Result<i64> {
         .with_context(|| format!("missing integer at {pointer}"))
 }
 
+/// Open the reusable state reader, retrying while a busy host holds the write lock.
+async fn open_state_reader(state_db_path: &std::path::Path) -> anyhow::Result<SendLedgerReader> {
+    const ATTEMPTS: usize = 10;
+    for attempt in 1..=ATTEMPTS {
+        match SendLedger::new(state_db_path.to_path_buf()).reader() {
+            Ok(reader) => return Ok(reader),
+            Err(error) if attempt < ATTEMPTS && is_database_busy(&error) => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            Err(error) => return Err(error).context("open the approval state reader"),
+        }
+    }
+    unreachable!("the retry loop returns on its last attempt")
+}
+
+fn is_database_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::DatabaseBusy
+    )
+}
+
 async fn wait_for_sent(state_db_path: &std::path::Path, approval_id: &str) -> anyhow::Result<()> {
+    // One SQLite connection for the whole poll cycle: re-opening the ledger on
+    // every tick re-runs the schema bootstrap (a write lock) and fails with
+    // "database is locked" while the worker holds that lock on a busy host.
+    let reader = open_state_reader(state_db_path).await?;
     for _ in 0..100 {
-        if SendLedger::new(state_db_path.to_path_buf())
+        if reader
             .get_approval(approval_id)?
             .is_some_and(|approval| approval.state == SendApprovalState::Sent)
         {
