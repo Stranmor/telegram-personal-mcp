@@ -11,10 +11,8 @@ and releases use [Semantic Versioning](https://semver.org/).
 - Added `SendLedger::reader()`, returning a reusable `SendLedgerReader` that
   keeps one state connection for a whole polling cycle. `SendLedger` is only a
   path handle, so every read opened a fresh connection and re-ran the schema
-  bootstrap, whose `INSERT OR IGNORE INTO approval_runtime` takes SQLite's write
-  lock; a poll loop that reopened per tick therefore failed with
-  `database is locked` as soon as a slow host held that lock past the busy
-  timeout, while WAL reads on a reused connection never contend with it.
+  bootstrap; a poll loop that reopened per tick paid for both on every
+  iteration.
 - Approval cards now carry the media they will publish: a mutation card whose
   action owns a local artifact is sent as a native Telegram media message
   (`sendPhoto`/`sendVideo`/`sendAnimation`/`sendVoice`/`sendDocument`) with the
@@ -52,6 +50,12 @@ and releases use [Semantic Versioning](https://semver.org/).
   `TELEGRAM_MCP_MESSAGE_CACHE_POLL_INTERVAL_SECS` (default unchanged: 2 s).
 
 ### Fixed
+- Opening the state store no longer takes SQLite's write lock in the steady
+  state: the `approval_runtime` seed row is inserted only when it is missing,
+  instead of an unconditional `INSERT OR IGNORE` on every open. Every
+  connection (approval-worker tick, MCP tool call, poll loop) used to contend
+  for that lock, and a host stalled on I/O surfaced the collision as
+  `database is locked`; the approval demo hit it while polling.
 - Approval cards name the recipient as a clickable contact instead of a bare
   numeric peer id: a username becomes a profile link
   (`https://t.me/<username>`), a user or bot without a username becomes a
