@@ -792,7 +792,7 @@ pub(crate) fn open_state_connection(path: &Path) -> rusqlite::Result<Connection>
         .is_some();
     if !runtime_row_present {
         connection.execute(
-            "INSERT INTO approval_runtime (singleton, next_update_id) VALUES (1, 0)",
+            "INSERT OR IGNORE INTO approval_runtime (singleton, next_update_id) VALUES (1, 0)",
             [],
         )?;
     }
