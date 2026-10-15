@@ -2426,11 +2426,34 @@ pub struct MessageReactionSummary {
     pub custom_emoji_id: Option<i64>,
 }
 
+/// One reaction's total on a message, as the message's own summary carries it.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct MessageReactionCount {
+    pub kind: String,
+    pub emoji: Option<String>,
+    pub custom_emoji_id: Option<i64>,
+    pub count: i32,
+    /// True when this is the reaction the authenticated account itself chose
+    /// (Telegram's `chosen_order` on the message summary).
+    pub chosen: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct MessageReactionPage {
     pub total_count: i32,
     pub reactions: Vec<MessageReactionSummary>,
     pub next_offset: Option<String>,
+    /// Per-reaction totals read from the message's own summary. Populated when
+    /// Telegram refused the per-viewer list (`viewer_list_forbidden` is set);
+    /// empty otherwise, where `reactions` is the authoritative answer.
+    #[serde(default)]
+    pub counts: Vec<MessageReactionCount>,
+    /// The RPC error name (for example `BROADCAST_FORBIDDEN`) when Telegram
+    /// refused the per-viewer reaction list at this place; `reactions` then
+    /// holds only the recent reactors the message summary exposes. `None` when
+    /// the per-viewer list was read.
+    #[serde(default)]
+    pub viewer_list_forbidden: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

@@ -40,24 +40,24 @@ use crate::domain::{
     InlineBotSwitchWebViewSummary, InviteJoinerPage, InviteJoinerSummary, InviteLinkKind,
     InviteLinkSummary, InviteSubscriptionPricingSummary, MessageButtonInventory, MessageButtonKind,
     MessageButtonMarkupType, MessageButtonStyleSummary, MessageButtonSummary, MessageLinkSummary,
-    MessagePage, MessageReactionPage, MessageReactionReadReceipt, MessageReactionSummary,
-    MessageReadReceipt, MessageTranslationBatch, MessageTranslationSummary, MyBoostsSummary,
-    NotificationSettingsPatch, NotificationSettingsSummary, NotificationSoundSummary,
-    OutboxReadDateSummary, ParticipantFilter, ParticipantPage, ParticipantSummary,
-    PeerColorSummary, PersonalChannelSummary, PollAnswerSummary, PollCreateSpec, PollOptionBinding,
-    PollSummary, PollVoterPage, PollVoterSummary, PrivacyKey, PrivacyRuleSummary, ProfilePhotoPage,
-    ProfilePhotoSummary, QuickReplyCatalogPage, QuickReplyMessagesPage, QuickReplyShortcutSummary,
-    QuickReplyStoredMessageSummary, ReactionCatalogPage, ReactionIdentity, ReactionSpec,
-    ResolvedBusinessChatLinkSummary, RichMediaSpec, RichMessageSnapshot, SavedDialogSummary,
-    SavedDialogsPage, SavedHistoryPage, SavedMessagesSearchRequest, SavedReactionTagSummary,
-    SavedReactionTagsPage, SavedStarGiftRef, SavedStarGiftSummary, SavedStarGiftsPage,
-    SavedStarGiftsRequest, SearchMessagesRequest, SentDocumentMediaSummary, SentRichMediaSummary,
-    SessionSummary, StarGiftAttributeSummary, StarGiftRaritySummary, StarGiftSummary,
-    StarsAmountKind, StarsAmountSummary, StarsStatusPage, StarsSubscriptionPricingSummary,
-    StarsSubscriptionSummary, StarsSubscriptionsPage, StarsTopupOptionSummary,
-    StarsTopupOptionsPage, StarsTransactionGiftSummary, StarsTransactionPeerSummary,
-    StarsTransactionSummary, StatsDateRangeSummary, StatsGraphSummary, StatsPercentSummary,
-    StatsPostInteractionSummary, StatsTopAdminSummary, StatsTopInviterSummary,
+    MessagePage, MessageReactionCount, MessageReactionPage, MessageReactionReadReceipt,
+    MessageReactionSummary, MessageReadReceipt, MessageTranslationBatch, MessageTranslationSummary,
+    MyBoostsSummary, NotificationSettingsPatch, NotificationSettingsSummary,
+    NotificationSoundSummary, OutboxReadDateSummary, ParticipantFilter, ParticipantPage,
+    ParticipantSummary, PeerColorSummary, PersonalChannelSummary, PollAnswerSummary,
+    PollCreateSpec, PollOptionBinding, PollSummary, PollVoterPage, PollVoterSummary, PrivacyKey,
+    PrivacyRuleSummary, ProfilePhotoPage, ProfilePhotoSummary, QuickReplyCatalogPage,
+    QuickReplyMessagesPage, QuickReplyShortcutSummary, QuickReplyStoredMessageSummary,
+    ReactionCatalogPage, ReactionIdentity, ReactionSpec, ResolvedBusinessChatLinkSummary,
+    RichMediaSpec, RichMessageSnapshot, SavedDialogSummary, SavedDialogsPage, SavedHistoryPage,
+    SavedMessagesSearchRequest, SavedReactionTagSummary, SavedReactionTagsPage, SavedStarGiftRef,
+    SavedStarGiftSummary, SavedStarGiftsPage, SavedStarGiftsRequest, SearchMessagesRequest,
+    SentDocumentMediaSummary, SentRichMediaSummary, SessionSummary, StarGiftAttributeSummary,
+    StarGiftRaritySummary, StarGiftSummary, StarsAmountKind, StarsAmountSummary, StarsStatusPage,
+    StarsSubscriptionPricingSummary, StarsSubscriptionSummary, StarsSubscriptionsPage,
+    StarsTopupOptionSummary, StarsTopupOptionsPage, StarsTransactionGiftSummary,
+    StarsTransactionPeerSummary, StarsTransactionSummary, StatsDateRangeSummary, StatsGraphSummary,
+    StatsPercentSummary, StatsPostInteractionSummary, StatsTopAdminSummary, StatsTopInviterSummary,
     StatsTopPosterSummary, StatsValueSummary, StickerCatalogPage, StickerDocumentSummary,
     StickerEmojiPackSummary, StickerKeywordSummary, StickerSetDetailsPage, StickerSetSearchPage,
     StickerSetSummary, StoryCollectionPage, StoryLinkSummary, StoryListPage, StoryPeerPage,
@@ -8017,6 +8017,14 @@ impl TelegramClient {
         message.media().map(rich_media_summary_from_tl).transpose().map(Option::flatten)
     }
 
+    /// List who reacted to one message.
+    ///
+    /// Broadcast channels answer `403 BROADCAST_FORBIDDEN` to Telegram's
+    /// per-viewer reaction list, so this returns the message's own summary
+    /// there instead of failing: per-reaction totals in `counts` (with
+    /// `chosen` marking this account's own reaction), the recent reactors the
+    /// summary exposes in `reactions`, and the refusal in
+    /// `viewer_list_forbidden`. Any other failure stays an error.
     pub async fn list_message_reactions(
         &self,
         session_path: Option<PathBuf>,
@@ -8030,7 +8038,7 @@ impl TelegramClient {
         let telegram_limit = i32::try_from(limit).map_err(|_| {
             TelegramError::InvalidPeer("list_message_reactions.limit is too large".to_string())
         })?;
-        let page = connected
+        match connected
             .client
             .iter_reaction_users(
                 peer.as_str(),
@@ -8040,37 +8048,20 @@ impl TelegramClient {
                 offset.map(str::to_string),
             )
             .await
-            .map_err(|error| TelegramError::Telegram(error.to_string()))?;
-        let reactions = page
-            .reactions
-            .into_iter()
-            .map(|reaction| {
-                let tl::enums::MessagePeerReaction::MessagePeerReaction(reaction) = reaction;
-                let (kind, emoji, custom_emoji_id) = match reaction.reaction {
-                    tl::enums::Reaction::Empty => ("empty", None, None),
-                    tl::enums::Reaction::Emoji(emoji) => ("emoji", Some(emoji.emoticon), None),
-                    tl::enums::Reaction::CustomEmoji(emoji) => {
-                        ("custom_emoji", None, Some(emoji.document_id))
-                    },
-                    tl::enums::Reaction::Paid => ("paid", None, None),
-                };
-                MessageReactionSummary {
-                    peer_ref: canonical_peer_ref(&reaction.peer_id),
-                    date_unix: reaction.date,
-                    big: reaction.big,
-                    unread: reaction.unread,
-                    my: reaction.my,
-                    kind: kind.to_string(),
-                    emoji,
-                    custom_emoji_id,
-                }
-            })
-            .collect();
-        Ok(MessageReactionPage {
-            total_count: page.count,
-            reactions,
-            next_offset: page.next_offset,
-        })
+        {
+            Ok(page) => Ok(reactions_list_page(page)),
+            Err(error) => match viewer_list_forbidden_reason(&error) {
+                Some(reason) => {
+                    let messages = connected
+                        .client
+                        .get_messages(peer.as_str(), &[message_id])
+                        .await
+                        .map_err(|error| TelegramError::Telegram(error.to_string()))?;
+                    Ok(reaction_page_from_summary(message_reactions_of(&messages), Some(reason)))
+                },
+                None => Err(TelegramError::Telegram(error.to_string())),
+            },
+        }
     }
 
     pub async fn get_default_reaction(
@@ -8169,12 +8160,7 @@ impl TelegramClient {
             .get_messages(peer.as_str(), &[message_id])
             .await
             .map_err(|error| TelegramError::Telegram(error.to_string()))?;
-        let reactions = messages.iter().find_map(|message| match &message.raw {
-            tl::enums::Message::Message(message) => Some(message.reactions.as_ref()),
-            tl::enums::Message::Service(message) => Some(message.reactions.as_ref()),
-            tl::enums::Message::Empty(_) => None,
-        });
-        my_reaction_from_reactions(reactions.flatten())
+        my_reaction_from_reactions(message_reactions_of(&messages))
     }
 
     pub async fn set_message_reaction(
@@ -16765,6 +16751,118 @@ fn my_reaction_from_reactions(
     }
 }
 
+/// The reaction summary the message itself carries — the one source that
+/// exists in broadcast channels too.
+fn message_reactions_of(
+    messages: &[ferogram::update::IncomingMessage],
+) -> Option<&tl::enums::MessageReactions> {
+    messages
+        .iter()
+        .find_map(|message| match &message.raw {
+            tl::enums::Message::Message(message) => Some(message.reactions.as_ref()),
+            tl::enums::Message::Service(message) => Some(message.reactions.as_ref()),
+            tl::enums::Message::Empty(_) => None,
+        })
+        .flatten()
+}
+
+/// Why Telegram refused the per-viewer reaction list at this place, when it
+/// did: broadcast channels answer `403 BROADCAST_FORBIDDEN` and no retry
+/// changes that. Any other failure stays an honest error.
+fn viewer_list_forbidden_reason(error: &ferogram::InvocationError) -> Option<String> {
+    match error {
+        ferogram::InvocationError::Rpc(rpc) if rpc.code == 403 => Some(rpc.name.clone()),
+        _ => None,
+    }
+}
+
+/// Map one wire reaction onto its kind and payload, shared by the per-viewer
+/// list and the message summary.
+fn reaction_kind_parts(
+    reaction: &tl::enums::Reaction,
+) -> (&'static str, Option<String>, Option<i64>) {
+    match reaction {
+        tl::enums::Reaction::Empty => ("empty", None, None),
+        tl::enums::Reaction::Emoji(emoji) => ("emoji", Some(emoji.emoticon.clone()), None),
+        tl::enums::Reaction::CustomEmoji(emoji) => ("custom_emoji", None, Some(emoji.document_id)),
+        tl::enums::Reaction::Paid => ("paid", None, None),
+    }
+}
+
+/// One per-viewer row of Telegram's reaction list.
+fn reaction_summary_from_peer_reaction(
+    reaction: &tl::enums::MessagePeerReaction,
+) -> MessageReactionSummary {
+    let tl::enums::MessagePeerReaction::MessagePeerReaction(reaction) = reaction;
+    let (kind, emoji, custom_emoji_id) = reaction_kind_parts(&reaction.reaction);
+    MessageReactionSummary {
+        peer_ref: canonical_peer_ref(&reaction.peer_id),
+        date_unix: reaction.date,
+        big: reaction.big,
+        unread: reaction.unread,
+        my: reaction.my,
+        kind: kind.to_string(),
+        emoji,
+        custom_emoji_id,
+    }
+}
+
+/// The per-viewer list Telegram returned, mapped onto the tool page.
+fn reactions_list_page(page: tl::types::messages::MessageReactionsList) -> MessageReactionPage {
+    MessageReactionPage {
+        total_count: page.count,
+        reactions: page.reactions.iter().map(reaction_summary_from_peer_reaction).collect(),
+        next_offset: page.next_offset,
+        counts: Vec::new(),
+        viewer_list_forbidden: None,
+    }
+}
+
+/// The message's own reaction summary as a tool page, used where Telegram
+/// refuses the per-viewer list: `counts` carries per-reaction totals (with
+/// `chosen` marking this account's own reaction) and `reactions` holds only
+/// the recent reactors the summary exposes.
+fn reaction_page_from_summary(
+    reactions: Option<&tl::enums::MessageReactions>,
+    viewer_list_forbidden: Option<String>,
+) -> MessageReactionPage {
+    let Some(tl::enums::MessageReactions::MessageReactions(reactions)) = reactions else {
+        return MessageReactionPage {
+            total_count: 0,
+            reactions: Vec::new(),
+            next_offset: None,
+            counts: Vec::new(),
+            viewer_list_forbidden,
+        };
+    };
+    let counts = reactions
+        .results
+        .iter()
+        .filter_map(|count| match count {
+            tl::enums::ReactionCount::ReactionCount(count) => {
+                let (kind, emoji, custom_emoji_id) = reaction_kind_parts(&count.reaction);
+                Some(MessageReactionCount {
+                    kind: kind.to_string(),
+                    emoji,
+                    custom_emoji_id,
+                    count: count.count,
+                    chosen: count.chosen_order.is_some(),
+                })
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let total_count = counts.iter().fold(0i32, |total, count| total.saturating_add(count.count));
+    let reactions = reactions
+        .recent_reactions
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(reaction_summary_from_peer_reaction)
+        .collect();
+    MessageReactionPage { total_count, reactions, next_offset: None, counts, viewer_list_forbidden }
+}
+
 /// Map one wire reaction onto the mutation-side reaction spec, keeping the
 /// error semantics the reaction approval flow relies on.
 fn reaction_spec_from_reaction(
@@ -20532,15 +20630,23 @@ mod tests {
         })
     }
 
-    fn reaction_count(
+    fn reaction_count_with(
         reaction: tl::enums::Reaction,
         chosen_order: Option<i32>,
+        count: i32,
     ) -> tl::enums::ReactionCount {
         tl::enums::ReactionCount::ReactionCount(tl::types::ReactionCount {
             chosen_order,
             reaction,
-            count: 1,
+            count,
         })
+    }
+
+    fn reaction_count(
+        reaction: tl::enums::Reaction,
+        chosen_order: Option<i32>,
+    ) -> tl::enums::ReactionCount {
+        reaction_count_with(reaction, chosen_order, 1)
     }
 
     fn peer_reaction(reaction: tl::enums::Reaction, my: bool, big: bool) -> tl::enums::MessagePeerReaction {
@@ -20606,5 +20712,82 @@ mod tests {
             my_reaction_from_reactions(Some(&reactions)),
             Err(TelegramError::InvalidPeer(_))
         ));
+    }
+
+    #[test]
+    fn a_forbidden_per_viewer_list_falls_back_to_the_message_summary() {
+        // 403 BROADCAST_FORBIDDEN is what a broadcast channel answers to the
+        // per-viewer list; the message summary still carries the totals and
+        // this account's own choice.
+        let summary = message_reactions(
+            vec![
+                reaction_count_with(emoji_reaction("❤"), None, 1),
+                reaction_count_with(emoji_reaction("👍"), Some(7), 5),
+            ],
+            Some(vec![peer_reaction(emoji_reaction("👍"), true, false)]),
+        );
+        let page =
+            reaction_page_from_summary(Some(&summary), Some("BROADCAST_FORBIDDEN".to_string()));
+        assert_eq!(page.viewer_list_forbidden.as_deref(), Some("BROADCAST_FORBIDDEN"));
+        assert_eq!(page.total_count, 6);
+        assert_eq!(page.next_offset, None);
+        assert_eq!(
+            page.counts,
+            vec![
+                MessageReactionCount {
+                    kind: "emoji".to_string(),
+                    emoji: Some("❤".to_string()),
+                    custom_emoji_id: None,
+                    count: 1,
+                    chosen: false,
+                },
+                MessageReactionCount {
+                    kind: "emoji".to_string(),
+                    emoji: Some("👍".to_string()),
+                    custom_emoji_id: None,
+                    count: 5,
+                    chosen: true,
+                },
+            ]
+        );
+        assert_eq!(page.reactions.len(), 1);
+        assert!(page.reactions[0].my);
+        assert_eq!(page.reactions[0].emoji.as_deref(), Some("👍"));
+    }
+
+    #[test]
+    fn only_a_permanent_read_refusal_switches_to_the_summary() {
+        let forbidden = ferogram::InvocationError::Rpc(ferogram::RpcError {
+            code: 403,
+            name: "BROADCAST_FORBIDDEN".to_string(),
+            value: None,
+        });
+        assert_eq!(
+            viewer_list_forbidden_reason(&forbidden).as_deref(),
+            Some("BROADCAST_FORBIDDEN")
+        );
+        let bad_request = ferogram::InvocationError::Rpc(ferogram::RpcError {
+            code: 400,
+            name: "MSG_ID_INVALID".to_string(),
+            value: None,
+        });
+        assert_eq!(viewer_list_forbidden_reason(&bad_request), None);
+        let flood = ferogram::InvocationError::Rpc(ferogram::RpcError {
+            code: 420,
+            name: "FLOOD_WAIT".to_string(),
+            value: Some(30),
+        });
+        assert_eq!(viewer_list_forbidden_reason(&flood), None);
+        assert_eq!(viewer_list_forbidden_reason(&ferogram::InvocationError::Dropped), None);
+    }
+
+    #[test]
+    fn a_message_without_a_reaction_summary_reads_as_an_empty_forbidden_page() {
+        let page = reaction_page_from_summary(None, Some("BROADCAST_FORBIDDEN".to_string()));
+        assert_eq!(page.total_count, 0);
+        assert!(page.counts.is_empty());
+        assert!(page.reactions.is_empty());
+        assert_eq!(page.next_offset, None);
+        assert_eq!(page.viewer_list_forbidden.as_deref(), Some("BROADCAST_FORBIDDEN"));
     }
 }

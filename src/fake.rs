@@ -11387,6 +11387,8 @@ impl TelegramBackend for FakeTelegramBackend {
             next_offset: (reactions.len() < usize::try_from(total_count).unwrap_or(usize::MAX))
                 .then(|| "fixture-next".to_string()),
             reactions,
+            counts: Vec::new(),
+            viewer_list_forbidden: None,
         })
     }
 
