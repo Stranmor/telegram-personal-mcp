@@ -8146,62 +8146,35 @@ impl TelegramClient {
         Ok(())
     }
 
+    /// The current account's own reaction on one message.
+    ///
+    /// Read from the message's own `reactions` summary, never from the per-user
+    /// reaction list: Telegram answers `403 BROADCAST_FORBIDDEN` to
+    /// `messages.getMessageReactionsList` in broadcast channels, and reaching
+    /// for that list made every reaction change in a channel fail before it
+    /// started — both preparation and application call this function. The
+    /// summary carries the same fact everywhere: `chosen_order` on a
+    /// `reactionCount` is set for the reaction this account chose, and `my` on
+    /// a `messagePeerReaction` marks it in the recent-reactions list.
     pub async fn get_my_reaction(
         &self,
         session_path: Option<PathBuf>,
         chat_id: &str,
         message_id: i32,
     ) -> Result<Option<ReactionSpec>, TelegramError> {
-        let mut offset = None;
-        for _ in 0..10 {
-            let page = self
-                .list_message_reactions(
-                    session_path.clone(),
-                    chat_id,
-                    message_id,
-                    100,
-                    offset.as_deref(),
-                )
-                .await?;
-            if let Some(reaction) = page.reactions.into_iter().find(|reaction| reaction.my) {
-                return match reaction.kind.as_str() {
-                    "emoji" => Ok(Some(ReactionSpec::Emoji {
-                        emoji: reaction.emoji.ok_or_else(|| {
-                            TelegramError::Telegram(
-                                "Telegram returned an emoji reaction without its value".to_string(),
-                            )
-                        })?,
-                        big: reaction.big,
-                        add_to_recent: false,
-                    })),
-                    "custom_emoji" => Ok(Some(ReactionSpec::CustomEmoji {
-                        document_id: reaction.custom_emoji_id.ok_or_else(|| {
-                            TelegramError::Telegram(
-                                "Telegram returned a custom reaction without document_id"
-                                    .to_string(),
-                            )
-                        })?,
-                        big: reaction.big,
-                        add_to_recent: false,
-                    })),
-                    "paid" => Err(TelegramError::InvalidPeer(
-                        "paid reactions are not represented by the ordinary reaction approval flow"
-                            .to_string(),
-                    )),
-                    other => Err(TelegramError::Telegram(format!(
-                        "Telegram returned unsupported current reaction kind {other}"
-                    ))),
-                };
-            }
-            let Some(next_offset) = page.next_offset else {
-                return Ok(None);
-            };
-            offset = Some(next_offset);
-        }
-        Err(TelegramError::DeliveryUncertain(
-            "could not exhaust Telegram reaction pages while reading the current account reaction"
-                .to_string(),
-        ))
+        let connected = self.connected(session_path).await?;
+        let peer = Self::resolve_peer_ref(&connected.client, chat_id).await?;
+        let messages = connected
+            .client
+            .get_messages(peer.as_str(), &[message_id])
+            .await
+            .map_err(|error| TelegramError::Telegram(error.to_string()))?;
+        let reactions = messages.iter().find_map(|message| match &message.raw {
+            tl::enums::Message::Message(message) => Some(message.reactions.as_ref()),
+            tl::enums::Message::Service(message) => Some(message.reactions.as_ref()),
+            tl::enums::Message::Empty(_) => None,
+        });
+        my_reaction_from_reactions(reactions.flatten())
     }
 
     pub async fn set_message_reaction(
@@ -16756,6 +16729,68 @@ fn is_concrete_raw_message(message: &tl::enums::Message) -> bool {
     !matches!(message, tl::enums::Message::Empty(_))
 }
 
+/// The current account's reaction as carried by a message's own `reactions`
+/// summary — the one source that exists in broadcast channels too.
+///
+/// `chosen_order` on a `reactionCount` is set for the reaction this account
+/// chose; `my` on a `messagePeerReaction` marks the same fact in the
+/// recent-reactions list. A message the account has not reacted to (including
+/// one that carries no reactions at all) yields `None`.
+fn my_reaction_from_reactions(
+    reactions: Option<&tl::enums::MessageReactions>,
+) -> Result<Option<ReactionSpec>, TelegramError> {
+    let Some(tl::enums::MessageReactions::MessageReactions(reactions)) = reactions else {
+        return Ok(None);
+    };
+    let chosen = reactions.results.iter().find_map(|count| match count {
+        tl::enums::ReactionCount::ReactionCount(count) if count.chosen_order.is_some() => {
+            Some(&count.reaction)
+        },
+        _ => None,
+    });
+    if let Some(reaction) = chosen {
+        return reaction_spec_from_reaction(reaction, false);
+    }
+    let mine = reactions.recent_reactions.as_ref().and_then(|recent| {
+        recent.iter().find_map(|reaction| match reaction {
+            tl::enums::MessagePeerReaction::MessagePeerReaction(reaction) if reaction.my => {
+                Some(reaction)
+            },
+            _ => None,
+        })
+    });
+    match mine {
+        Some(reaction) => reaction_spec_from_reaction(&reaction.reaction, reaction.big),
+        None => Ok(None),
+    }
+}
+
+/// Map one wire reaction onto the mutation-side reaction spec, keeping the
+/// error semantics the reaction approval flow relies on.
+fn reaction_spec_from_reaction(
+    reaction: &tl::enums::Reaction,
+    big: bool,
+) -> Result<Option<ReactionSpec>, TelegramError> {
+    match reaction {
+        tl::enums::Reaction::Emoji(emoji) => Ok(Some(ReactionSpec::Emoji {
+            emoji: emoji.emoticon.clone(),
+            big,
+            add_to_recent: false,
+        })),
+        tl::enums::Reaction::CustomEmoji(emoji) => Ok(Some(ReactionSpec::CustomEmoji {
+            document_id: emoji.document_id,
+            big,
+            add_to_recent: false,
+        })),
+        tl::enums::Reaction::Paid => Err(TelegramError::InvalidPeer(
+            "paid reactions are not represented by the ordinary reaction approval flow".to_string(),
+        )),
+        tl::enums::Reaction::Empty => Err(TelegramError::Telegram(
+            "Telegram returned unsupported current reaction kind empty".to_string(),
+        )),
+    }
+}
+
 fn sticker_set_summary_from_tl(set: tl::types::StickerSet) -> StickerSetSummary {
     StickerSetSummary {
         sticker_set_id: set.id,
@@ -20476,6 +20511,100 @@ mod tests {
             channel_participants_filter(ParticipantFilter::Contacts, Some("mira")),
             tl::enums::ChannelParticipantsFilter::ChannelParticipantsContacts(filter)
                 if filter.q == "mira"
+        ));
+    }
+
+    fn emoji_reaction(emoji: &str) -> tl::enums::Reaction {
+        tl::enums::Reaction::Emoji(tl::types::ReactionEmoji { emoticon: emoji.to_string() })
+    }
+
+    fn message_reactions(
+        results: Vec<tl::enums::ReactionCount>,
+        recent: Option<Vec<tl::enums::MessagePeerReaction>>,
+    ) -> tl::enums::MessageReactions {
+        tl::enums::MessageReactions::MessageReactions(tl::types::MessageReactions {
+            min: false,
+            can_see_list: false,
+            reactions_as_tags: false,
+            results,
+            recent_reactions: recent,
+            top_reactors: None,
+        })
+    }
+
+    fn reaction_count(
+        reaction: tl::enums::Reaction,
+        chosen_order: Option<i32>,
+    ) -> tl::enums::ReactionCount {
+        tl::enums::ReactionCount::ReactionCount(tl::types::ReactionCount {
+            chosen_order,
+            reaction,
+            count: 1,
+        })
+    }
+
+    fn peer_reaction(reaction: tl::enums::Reaction, my: bool, big: bool) -> tl::enums::MessagePeerReaction {
+        tl::enums::MessagePeerReaction::MessagePeerReaction(tl::types::MessagePeerReaction {
+            big,
+            unread: false,
+            my,
+            peer_id: tl::enums::Peer::User(tl::types::PeerUser { user_id: 42 }),
+            date: 1_792_000_000,
+            reaction,
+        })
+    }
+
+    #[test]
+    fn chosen_order_marks_the_current_account_reaction() {
+        // Broadcast channels forbid the per-user reaction list, so the message
+        // summary is the only source left; `chosen_order` is what it sets for
+        // the reaction this account chose.
+        let reactions = message_reactions(
+            vec![
+                reaction_count(emoji_reaction("❤"), None),
+                reaction_count(emoji_reaction("👍"), Some(7)),
+            ],
+            None,
+        );
+        assert_eq!(
+            my_reaction_from_reactions(Some(&reactions)).expect("reaction read"),
+            Some(ReactionSpec::Emoji { emoji: "👍".to_string(), big: false, add_to_recent: false })
+        );
+    }
+
+    #[test]
+    fn recent_reactions_my_entry_marks_the_current_account_reaction() {
+        let reactions = message_reactions(
+            vec![reaction_count(emoji_reaction("🎉"), None)],
+            Some(vec![
+                peer_reaction(emoji_reaction("❤"), false, false),
+                peer_reaction(tl::enums::Reaction::CustomEmoji(tl::types::ReactionCustomEmoji { document_id: 777 }), true, true),
+            ]),
+        );
+        assert_eq!(
+            my_reaction_from_reactions(Some(&reactions)).expect("reaction read"),
+            Some(ReactionSpec::CustomEmoji { document_id: 777, big: true, add_to_recent: false })
+        );
+    }
+
+    #[test]
+    fn a_message_without_the_account_reaction_reads_as_none() {
+        let others_only = message_reactions(
+            vec![reaction_count(emoji_reaction("🔥"), None)],
+            Some(vec![peer_reaction(emoji_reaction("🔥"), false, false)]),
+        );
+        assert_eq!(my_reaction_from_reactions(Some(&others_only)).expect("reaction read"), None);
+        let empty = message_reactions(Vec::new(), None);
+        assert_eq!(my_reaction_from_reactions(Some(&empty)).expect("reaction read"), None);
+        assert_eq!(my_reaction_from_reactions(None).expect("reaction read"), None);
+    }
+
+    #[test]
+    fn a_paid_reaction_stays_out_of_the_ordinary_approval_flow() {
+        let reactions = message_reactions(vec![reaction_count(tl::enums::Reaction::Paid, Some(1))], None);
+        assert!(matches!(
+            my_reaction_from_reactions(Some(&reactions)),
+            Err(TelegramError::InvalidPeer(_))
         ));
     }
 }
