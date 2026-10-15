@@ -2443,6 +2443,11 @@ pub struct MessageReactionPage {
     /// Telegram's reactor count when the per-viewer list answered; the sum of
     /// `counts` when the page carries the message's own summary instead.
     pub total_count: i32,
+    /// Who reacted, when Telegram answered the per-viewer list. With
+    /// `viewer_list_forbidden` set this holds only the recent reactors the
+    /// message summary exposes — not the full list, and `my` on those rows is
+    /// then not authoritative: `counts[].chosen` is the signal for this
+    /// account's own reaction.
     pub reactions: Vec<MessageReactionSummary>,
     pub next_offset: Option<String>,
     /// Per-reaction totals read from the message's own summary. Populated when
@@ -2451,9 +2456,10 @@ pub struct MessageReactionPage {
     #[serde(default)]
     pub counts: Vec<MessageReactionCount>,
     /// The RPC error name (for example `BROADCAST_FORBIDDEN`) when Telegram
-    /// refused the per-viewer reaction list at this place; `reactions` then
-    /// holds only the recent reactors the message summary exposes. `None` when
-    /// the per-viewer list was read.
+    /// refused the per-viewer reaction list at this place. The page then comes
+    /// from the message's own summary: `counts` carries the totals, `reactions`
+    /// only the recent reactors, and the request's `limit`/`offset` do not
+    /// apply. `None` when the per-viewer list was read.
     #[serde(default)]
     pub viewer_list_forbidden: Option<String>,
 }

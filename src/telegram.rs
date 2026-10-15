@@ -8058,7 +8058,12 @@ impl TelegramClient {
                         .client
                         .get_messages(peer.as_str(), &[message_id])
                         .await
-                        .map_err(|error| TelegramError::Telegram(error.to_string()))?;
+                        .map_err(|summary_error| {
+                            TelegramError::Telegram(format!(
+                                "the per-viewer reaction list is forbidden ({reason}), and reading \
+                                 the message summary failed too: {summary_error}"
+                            ))
+                        })?;
                     Ok(reaction_page_from_summary(message_reactions_of(&messages), Some(reason)))
                 },
                 None => Err(TelegramError::Telegram(error.to_string())),
