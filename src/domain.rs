@@ -2440,6 +2440,8 @@ pub struct MessageReactionCount {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct MessageReactionPage {
+    /// Telegram's reactor count when the per-viewer list answered; the sum of
+    /// `counts` when the page carries the message's own summary instead.
     pub total_count: i32,
     pub reactions: Vec<MessageReactionSummary>,
     pub next_offset: Option<String>,

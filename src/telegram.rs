@@ -8024,7 +8024,9 @@ impl TelegramClient {
     /// there instead of failing: per-reaction totals in `counts` (with
     /// `chosen` marking this account's own reaction), the recent reactors the
     /// summary exposes in `reactions`, and the refusal in
-    /// `viewer_list_forbidden`. Any other failure stays an error.
+    /// `viewer_list_forbidden`. The summary is not paginated, so the fallback
+    /// ignores `limit`/`offset` and leaves `next_offset` empty. Any other
+    /// failure stays an error.
     pub async fn list_message_reactions(
         &self,
         session_path: Option<PathBuf>,
@@ -16838,18 +16840,16 @@ fn reaction_page_from_summary(
     let counts = reactions
         .results
         .iter()
-        .filter_map(|count| match count {
-            tl::enums::ReactionCount::ReactionCount(count) => {
-                let (kind, emoji, custom_emoji_id) = reaction_kind_parts(&count.reaction);
-                Some(MessageReactionCount {
-                    kind: kind.to_string(),
-                    emoji,
-                    custom_emoji_id,
-                    count: count.count,
-                    chosen: count.chosen_order.is_some(),
-                })
-            },
-            _ => None,
+        .map(|count| {
+            let tl::enums::ReactionCount::ReactionCount(count) = count;
+            let (kind, emoji, custom_emoji_id) = reaction_kind_parts(&count.reaction);
+            MessageReactionCount {
+                kind: kind.to_string(),
+                emoji,
+                custom_emoji_id,
+                count: count.count,
+                chosen: count.chosen_order.is_some(),
+            }
         })
         .collect::<Vec<_>>();
     let total_count = counts.iter().fold(0i32, |total, count| total.saturating_add(count.count));
