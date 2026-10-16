@@ -13523,6 +13523,10 @@ impl McpServer {
                 })
             });
         if let Some(coverage) = coverage {
+            let permission_id = match &coverage {
+                CoveredBy::Grant(_) => None,
+                CoveredBy::Permission(lease) => Some(lease.use_record.id),
+            };
             match &coverage {
                 CoveredBy::Grant(grant_use) => tracing::info!(
                     target: "telegram_personal_mcp",
@@ -13531,13 +13535,13 @@ impl McpServer {
                     granted_by = grant_use.granted_by,
                     "owner grant covered this send; approval card skipped"
                 ),
-                CoveredBy::Permission(permission) => tracing::info!(
+                CoveredBy::Permission(lease) => tracing::info!(
                     target: "telegram_personal_mcp",
-                    permission_id = permission.id,
-                    subject = %permission.subject,
-                    target = %permission.target,
-                    used = permission.used,
-                    max_uses = permission.max_uses,
+                    permission_id = lease.use_record.id,
+                    subject = %lease.use_record.subject,
+                    target = %lease.use_record.target,
+                    used = lease.use_record.used,
+                    max_uses = lease.use_record.max_uses,
                     "owner permission covered this send; approval card skipped"
                 ),
             }
@@ -13581,6 +13585,47 @@ impl McpServer {
                     false,
                 ))));
             }
+            // The entry lease covered the ledger transition; release it, then
+            // re-read the mirror under the writer-shared lock immediately
+            // before the provider action. A revoke or a stale export that
+            // landed in between must deny the send instead of authorizing an
+            // action the owner no longer approves.
+            drop(coverage);
+            let _permission_guard = match permission_id {
+                Some(permission_id) => {
+                    let path = runtime
+                        .policy
+                        .owner_permission_file
+                        .as_deref()
+                        .expect("a permission lease implies a configured owner permission file");
+                    match crate::approval::revalidate_owner_permission(
+                        path,
+                        permission_id,
+                        &peers,
+                        "send_message",
+                        now_unix(),
+                    ) {
+                        Ok(Some(lease)) => Some(lease),
+                        Ok(None) | Err(_) => {
+                            self.send_ledger
+                                .mark_approval_known_send_failure(
+                                    &request.public.approval_id,
+                                    "OWNER_PERMISSION_REVALIDATION_FAILED",
+                                    now_unix(),
+                                )
+                                .map_err(|error| {
+                                    Json(ToolOutcome::failure(ledger_failure(error)))
+                                })?;
+                            return Err(Json(ToolOutcome::failure(ToolFailure::new(
+                                "OWNER_PERMISSION_REVALIDATION_FAILED",
+                                "the owner permission no longer authorizes this send; the approval card is required again",
+                                false,
+                            ))));
+                        },
+                    }
+                },
+                None => None,
+            };
             // The snapshot captured before the transition still says
             // dispatching_card; the send path requires the reloaded sending
             // state, the same way a granted mutation reloads applying.
@@ -15394,6 +15439,7 @@ impl McpServer {
             );
         }
         let peer_refs: Vec<&str> = mutation_peers.iter().map(String::as_str).collect();
+        let action_label = mutation_action_label(&request.public.action);
         let coverage = if peer_refs.is_empty() {
             None
         } else {
@@ -15410,7 +15456,7 @@ impl McpServer {
                         crate::approval::consume_owner_permission(
                             path,
                             &peer_refs,
-                            &mutation_action_label(&request.public.action),
+                            &action_label,
                             now_unix(),
                         )
                         .map(CoveredBy::Permission)
@@ -15418,6 +15464,10 @@ impl McpServer {
                 })
         };
         if let Some(coverage) = coverage {
+            let permission_id = match &coverage {
+                CoveredBy::Grant(_) => None,
+                CoveredBy::Permission(lease) => Some(lease.use_record.id),
+            };
             match &coverage {
                 CoveredBy::Grant(grant_use) => tracing::info!(
                     target: "telegram_personal_mcp",
@@ -15426,13 +15476,13 @@ impl McpServer {
                     granted_by = grant_use.granted_by,
                     "owner grant covered this mutation; approval card skipped"
                 ),
-                CoveredBy::Permission(permission) => tracing::info!(
+                CoveredBy::Permission(lease) => tracing::info!(
                     target: "telegram_personal_mcp",
-                    permission_id = permission.id,
-                    subject = %permission.subject,
-                    target = %permission.target,
-                    used = permission.used,
-                    max_uses = permission.max_uses,
+                    permission_id = lease.use_record.id,
+                    subject = %lease.use_record.subject,
+                    target = %lease.use_record.target,
+                    used = lease.use_record.used,
+                    max_uses = lease.use_record.max_uses,
                     "owner permission covered this mutation; approval card skipped"
                 ),
             }
@@ -15453,6 +15503,55 @@ impl McpServer {
                 let applying = self
                     .reload_mutation_approval(&request.public.approval_id)
                     .map_err(|error| Json(ToolOutcome::failure(error)))?;
+                // The entry lease covered the ledger transition; release it,
+                // then re-read the mirror under the writer-shared lock
+                // immediately before the provider call. A revoke or a stale
+                // export that landed in between must deny the mutation
+                // instead of applying an action the owner no longer approves.
+                drop(coverage);
+                let _permission_guard = match permission_id {
+                    Some(permission_id) => {
+                        let path = runtime
+                            .policy
+                            .owner_permission_file
+                            .as_deref()
+                            .expect("a permission lease implies a configured owner permission file");
+                        match crate::approval::revalidate_owner_permission(
+                            path,
+                            permission_id,
+                            &peer_refs,
+                            &action_label,
+                            now_unix(),
+                        ) {
+                            Ok(Some(lease)) => Some(lease),
+                            Ok(None) | Err(_) => {
+                                self.mutation_ledger
+                                    .mark_known_failure(
+                                        &request.public.approval_id,
+                                        "OWNER_PERMISSION_REVALIDATION_FAILED",
+                                        now_unix(),
+                                    )
+                                    .map_err(|error| {
+                                        Json(ToolOutcome::failure(ledger_failure(error)))
+                                    })?;
+                                self.mutation_ledger
+                                    .set_last_error_message(
+                                        &request.public.approval_id,
+                                        Some("the owner permission no longer authorizes this mutation; the approval card is required again"),
+                                    )
+                                    .map_err(|error| {
+                                        Json(ToolOutcome::failure(ledger_failure(error)))
+                                    })?;
+                                return Err(Json(ToolOutcome::failure(ToolFailure::new(
+                                    "OWNER_PERMISSION_REVALIDATION_FAILED",
+                                    "the owner permission no longer authorizes this mutation; the approval card is required again",
+                                    false,
+                                ))));
+                            },
+                        }
+                    },
+                    None => None,
+                };
                 self.complete_mutation_application(runtime, applying)
                     .await
                     .map_err(|error| Json(ToolOutcome::failure(error)))?;
@@ -38548,7 +38647,7 @@ mod tests {
 /// permission exported by orch. Only the label for the log line differs.
 enum CoveredBy {
     Grant(crate::approval::OwnerGrantUse),
-    Permission(crate::approval::OwnerPermissionUse),
+    Permission(crate::approval::OwnerPermissionLease),
 }
 
 /// Durable permissions declare actions by name (`send_message`,

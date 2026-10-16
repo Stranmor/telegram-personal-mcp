@@ -335,7 +335,7 @@ pub struct OwnerPermissionEvidence {
     pub quote: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct OwnerPermissionUse {
     pub id: i64,
     pub subject: String,
@@ -346,64 +346,213 @@ pub struct OwnerPermissionUse {
     pub at_unix: i64,
 }
 
-/// A record counts only with the owner's quoted words and their message id.
-fn owner_evidence_present(record: &OwnerPermissionRecord) -> bool {
-    record.evidence.by == "owner"
-        && record.evidence.msg_id > 0
-        && !record.evidence.quote.trim().is_empty()
+/// An authorization and its held inter-process mirror lock. Callers keep this
+/// lease through their ledger transition and provider action.
+pub struct OwnerPermissionLease {
+    pub use_record: OwnerPermissionUse,
+    _lock: OwnerPermissionFileLock,
 }
 
-/// Uses already consumed per permission id, counted from the side journal —
-/// the mirror stays untouched (one writer per file).
-fn permission_journal_uses(path: &Path) -> HashMap<i64, i64> {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return HashMap::new();
-    };
-    let mut counts: HashMap<i64, i64> = HashMap::new();
-    for line in raw.lines() {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(id) = value.get("id").and_then(serde_json::Value::as_i64) {
-                *counts.entry(id).or_insert(0) += 1;
-            }
+struct OwnerPermissionFileLock {
+    file: File,
+}
+
+impl Drop for OwnerPermissionFileLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+fn permission_mirror_lock_path(path: &Path) -> PathBuf {
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    PathBuf::from(lock_path)
+}
+
+fn open_owner_permission_lock_file(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true).mode(0o600);
+    #[cfg(target_os = "linux")]
+    options.custom_flags(0x20000); // O_NOFOLLOW
+    let file = options.open(path)?;
+    restrict_private_file(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "owner permission lock is not a regular file"));
+    }
+    Ok(file)
+}
+
+fn acquire_owner_permission_lock(path: &Path) -> io::Result<OwnerPermissionFileLock> {
+    let lock_path = permission_mirror_lock_path(path);
+    if let Some(parent) = lock_path.parent() {
+        let create_private_parent = !parent.exists();
+        std::fs::create_dir_all(parent)?;
+        if create_private_parent {
+            restrict_private_directory(parent)?;
         }
     }
-    counts
+    let file = open_owner_permission_lock_file(&lock_path)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(OwnerPermissionFileLock { file }),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "owner permission mirror lock timed out after 5 seconds"));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            },
+            Err(error) => return Err(error),
+        }
+    }
 }
 
-fn journal_permission_use(path: &Path, use_record: &OwnerPermissionUse) {
-    let line = match serde_json::to_string(use_record) {
-        Ok(line) => line,
-        Err(_) => return,
+/// Uses already consumed per permission id, counted from the side journal.
+/// A malformed or unreadable journal is not treated as an empty journal.
+fn permission_journal_uses(path: &Path) -> io::Result<HashMap<i64, i64>> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => return Err(error),
     };
-    if std::fs::metadata(path).is_err() {
-        let _ = std::fs::write(path, b"");
-        let _ = std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    let mut counts: HashMap<i64, i64> = HashMap::new();
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let use_record = serde_json::from_str::<OwnerPermissionUse>(line)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if use_record.id <= 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "owner permission journal contains a non-positive id"));
+        }
+        let count = counts.entry(use_record.id).or_insert(0);
+        *count = count.saturating_add(1);
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path) {
-        use std::io::Write;
-        let _ = writeln!(file, "{line}");
-    }
+    Ok(counts)
 }
 
-/// Consume one use of a live owner permission covering exactly these peers and
-/// this action, or `None` when nothing matches: the file is missing or
-/// malformed, the record carries no owner evidence, it expired or ran out of
-/// uses, or the peer/action pair is not listed. This is the ONLY path that can
-/// cover a denied peer (@BotFather): the record must name that peer
-/// explicitly and carry the owner's quoted words; absent evidence every card
-/// stays mandatory. Honest limits of the mirror: expiry is enforced here, and
-/// revocation reaches this consumer only through the next orch export — the
-/// export happens on grant/revoke and on every orch permissions tick.
+fn journal_permission_use(path: &Path, use_record: &OwnerPermissionUse) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let line = serde_json::to_vec(use_record)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true).write(true).mode(0o600);
+    #[cfg(target_os = "linux")]
+    options.custom_flags(0x20000); // O_NOFOLLOW
+    let mut file = options.open(path)?;
+    restrict_private_file(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "owner permission journal is not a regular file"));
+    }
+    file.write_all(&line)?;
+    file.write_all(b"\n")?;
+    file.sync_data()
+}
+
+fn permission_record_matches(
+    record: &OwnerPermissionRecord,
+    permission_id: i64,
+    wanted: &[String],
+    action: &str,
+    now_unix: i64,
+) -> Option<String> {
+    if record.id != permission_id || permission_id <= 0 || !owner_evidence_present(record) {
+        return None;
+    }
+    let expires = record.expires_at_unix?;
+    if expires <= 0 || now_unix >= expires {
+        return None;
+    }
+    if !record.actions.is_empty()
+        && !record.actions.iter().any(|allowed| normalize_peer(allowed) == normalize_peer(action))
+    {
+        return None;
+    }
+    record.peers.iter().find_map(|allowed| {
+        let candidate = normalize_peer(allowed);
+        wanted.iter().any(|wanted| wanted == &candidate).then(|| allowed.clone())
+    })
+}
+
+/// The orch writer re-exports the mirror on every permissions tick (60 s) and
+/// on every grant/revoke/use. Ten missed refreshes mean the exporter is gone
+/// or wedged, so its snapshot can no longer be trusted — the reader denies
+/// (fail-closed) and the ordinary approval card takes over.
+const OWNER_PERMISSION_MIRROR_MAX_AGE_SECONDS: i64 = 600;
+
+fn owner_permission_mirror_is_fresh(file: &OwnerPermissionsFile, now_unix: i64) -> bool {
+    let generated = file.generated_at_unix;
+    generated > 0 && now_unix.saturating_sub(generated) <= OWNER_PERMISSION_MIRROR_MAX_AGE_SECONDS
+}
+
+/// Re-read the latest mirror under its writer-shared lock and keep that lock
+/// held if the exact permission is still valid. Missing/invalid mirror data is
+/// a denied check; lock and I/O failures remain distinguishable to the caller.
+pub fn revalidate_owner_permission(
+    path: &Path,
+    permission_id: i64,
+    peers: &[&str],
+    action: &str,
+    now_unix: i64,
+) -> io::Result<Option<OwnerPermissionLease>> {
+    let lock = acquire_owner_permission_lock(path)?;
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Ok(file) = serde_json::from_str::<OwnerPermissionsFile>(&raw) else {
+        return Ok(None);
+    };
+    if !owner_permission_mirror_is_fresh(&file, now_unix) {
+        return Ok(None);
+    }
+    let wanted: Vec<String> = peers
+        .iter()
+        .filter(|peer| !peer.trim().is_empty())
+        .map(|peer| normalize_peer(peer))
+        .collect();
+    let Some(record) = file.permissions.iter().find(|record| {
+        permission_record_matches(record, permission_id, &wanted, action, now_unix).is_some()
+    }) else {
+        return Ok(None);
+    };
+    let Some(target) = permission_record_matches(record, permission_id, &wanted, action, now_unix)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(OwnerPermissionLease {
+        use_record: OwnerPermissionUse {
+            id: record.id,
+            subject: record.subject.clone(),
+            target,
+            action: action.to_string(),
+            used: 0,
+            max_uses: record.max_uses,
+            at_unix: now_unix,
+        },
+        _lock: lock,
+    }))
+}
+
+/// Consume one use of a live owner permission covering these peers and this
+/// action. All failures, including lock contention and journal corruption,
+/// leave authorization to the ordinary approval-card path.
 pub fn consume_owner_permission(
     path: &Path,
     peers: &[&str],
     action: &str,
     now_unix: i64,
-) -> Option<OwnerPermissionUse> {
+) -> Option<OwnerPermissionLease> {
+    let lock = acquire_owner_permission_lock(path).ok()?;
     let raw = std::fs::read_to_string(path).ok()?;
     let file: OwnerPermissionsFile = serde_json::from_str(&raw).ok()?;
+    if !owner_permission_mirror_is_fresh(&file, now_unix) {
+        return None;
+    }
     let journal = path.with_extension("json.log");
-    let counts = permission_journal_uses(&journal);
+    let counts = permission_journal_uses(&journal).ok()?;
     let wanted: Vec<String> = peers
         .iter()
         .filter(|peer| !peer.trim().is_empty())
@@ -413,44 +562,28 @@ pub fn consume_owner_permission(
         return None;
     }
     for record in &file.permissions {
-        if !owner_evidence_present(record) {
+        if !owner_evidence_present(record) || record.id <= 0 || record.max_uses < 0 {
             continue;
         }
-        if let Some(expires) = record.expires_at_unix {
-            if now_unix >= expires {
-                continue;
-            }
-        }
+        let Some(target) = permission_record_matches(record, record.id, &wanted, action, now_unix)
+        else {
+            continue;
+        };
         let used = counts.get(&record.id).copied().unwrap_or(0);
         if record.max_uses > 0 && used >= record.max_uses {
             continue;
         }
-        if !record.actions.is_empty()
-            && !record
-                .actions
-                .iter()
-                .any(|allowed| normalize_peer(allowed) == normalize_peer(action))
-        {
-            continue;
-        }
-        let target = record.peers.iter().find(|allowed| {
-            let candidate = normalize_peer(allowed);
-            wanted.iter().any(|wanted| wanted == &candidate)
-        });
-        let Some(target) = target else {
-            continue;
-        };
         let use_record = OwnerPermissionUse {
             id: record.id,
             subject: record.subject.clone(),
-            target: target.clone(),
+            target,
             action: action.to_string(),
-            used: used + 1,
+            used: used.saturating_add(1),
             max_uses: record.max_uses,
             at_unix: now_unix,
         };
-        journal_permission_use(&journal, &use_record);
-        return Some(use_record);
+        journal_permission_use(&journal, &use_record).ok()?;
+        return Some(OwnerPermissionLease { use_record, _lock: lock });
     }
     None
 }
@@ -6757,8 +6890,17 @@ mod tests {
     }
 
     fn write_permissions(path: &std::path::Path, records: &[OwnerPermissionRecord]) {
-        let file =
-            OwnerPermissionsFile { v: 1, generated_at_unix: 1_000, permissions: records.to_vec() };
+        // Fresh relative to the 5_000 clock the permission tests use: the
+        // consumer denies a mirror older than ten writer ticks.
+        write_permissions_at(path, 4_995, records);
+    }
+
+    fn write_permissions_at(
+        path: &std::path::Path,
+        generated_at_unix: i64,
+        records: &[OwnerPermissionRecord],
+    ) {
+        let file = OwnerPermissionsFile { v: 1, generated_at_unix, permissions: records.to_vec() };
         std::fs::write(path, serde_json::to_vec_pretty(&file).expect("permissions json"))
             .expect("write permissions");
     }
@@ -6790,12 +6932,14 @@ mod tests {
         write_permissions(&path, &[live_permission(7, &["@BotFather"], &["press_button"])]);
         // The send path passes the target's several spellings; the record names
         // the denied peer explicitly, so the card is covered.
-        let use_record =
+        let lease =
             consume_owner_permission(&path, &["93372553", "BotFather"], "press_button", 5_000)
                 .expect("a named peer with owner evidence must be covered");
-        assert_eq!(use_record.id, 7);
-        assert_eq!(use_record.used, 1);
-        assert_eq!(use_record.target, "@BotFather");
+        assert_eq!(lease.use_record.id, 7);
+        assert_eq!(lease.use_record.used, 1);
+        assert_eq!(lease.use_record.target, "@BotFather");
+        // The lease holds the writer-shared mirror lock until it is dropped.
+        drop(lease);
         // A peer the record does not name stays uncovered in the same file.
         assert!(
             consume_owner_permission(&path, &["@someone_else"], "press_button", 5_000).is_none()
@@ -6828,6 +6972,124 @@ mod tests {
             consume_owner_permission(&path, &["BotFather"], "press_button", 5_000).is_none(),
             "an action outside the record's list is not covered"
         );
+    }
+
+    #[test]
+    fn owner_permission_without_expiry_is_denied() {
+        // Absent expiry must never mean unbounded: a record without
+        // expires_at_unix covers nothing, exactly like an expired one.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("owner-permissions.json");
+        let mut unbounded = live_permission(12, &["BotFather"], &["press_button"]);
+        unbounded.expires_at_unix = None;
+        write_permissions(&path, &[unbounded]);
+        assert!(consume_owner_permission(&path, &["BotFather"], "press_button", 5_000).is_none());
+    }
+
+    #[test]
+    fn owner_permission_stale_mirror_is_denied() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("owner-permissions.json");
+        // 601 s older than the check clock is beyond ten missed 60-second
+        // writer ticks: the exporter is gone, so nothing may be covered.
+        write_permissions_at(
+            &path,
+            5_000 - 601,
+            &[live_permission(13, &["BotFather"], &["press_button"])],
+        );
+        assert!(consume_owner_permission(&path, &["BotFather"], "press_button", 5_000).is_none());
+        assert!(
+            revalidate_owner_permission(&path, 13, &["BotFather"], "press_button", 5_000)
+                .expect("revalidate")
+                .is_none()
+        );
+        // Exactly at the bound the mirror is still trusted.
+        write_permissions_at(
+            &path,
+            5_000 - 600,
+            &[live_permission(13, &["BotFather"], &["press_button"])],
+        );
+        assert!(consume_owner_permission(&path, &["BotFather"], "press_button", 5_000).is_some());
+        // A zero generation stamp is a broken export, not a fresh one.
+        write_permissions_at(
+            &path,
+            0,
+            &[live_permission(13, &["BotFather"], &["press_button"])],
+        );
+        assert!(consume_owner_permission(&path, &["BotFather"], "press_button", 5_000).is_none());
+    }
+
+    #[test]
+    fn owner_permission_journal_corruption_is_denied() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("owner-permissions.json");
+        write_permissions(&path, &[live_permission(14, &["BotFather"], &["press_button"])]);
+        std::fs::write(path.with_extension("json.log"), b"not json\n").expect("journal");
+        assert!(
+            consume_owner_permission(&path, &["BotFather"], "press_button", 5_000).is_none(),
+            "a malformed journal is not an empty journal"
+        );
+    }
+
+    #[test]
+    fn owner_permission_lease_holds_the_writer_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("owner-permissions.json");
+        write_permissions(&path, &[live_permission(15, &["BotFather"], &["press_button"])]);
+        let lease = consume_owner_permission(&path, &["BotFather"], "press_button", 5_000)
+            .expect("covered while the writer lock is free");
+        // While the lease is alive the writer-shared sidecar lock is held, so
+        // the orch writer cannot commit a revoke or export a new mirror.
+        let lock_path = path.with_extension("json.lock");
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("lock file");
+        assert!(probe.try_lock_exclusive().is_err(), "the lease must hold the lock");
+        drop(lease);
+        assert!(probe.try_lock_exclusive().is_ok(), "dropping the lease releases the lock");
+    }
+
+    #[test]
+    fn owner_permission_denies_when_the_writer_lock_is_held() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("owner-permissions.json");
+        write_permissions(&path, &[live_permission(17, &["BotFather"], &["press_button"])]);
+        let lock_path = path.with_extension("json.lock");
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("lock file");
+        held.try_lock_exclusive().expect("the test holds the writer lock");
+        // The consumer waits up to five seconds for the writer lock and then
+        // denies; it never reads the mirror without the lock.
+        assert!(consume_owner_permission(&path, &["BotFather"], "press_button", 5_000).is_none());
+        FileExt::unlock(&held).expect("release the test lock");
+    }
+
+    #[test]
+    fn owner_permission_revalidate_sees_a_revoked_mirror() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("owner-permissions.json");
+        write_permissions(&path, &[live_permission(16, &["BotFather"], &["press_button"])]);
+        let lease = consume_owner_permission(&path, &["BotFather"], "press_button", 5_000)
+            .expect("covered before the revoke");
+        drop(lease);
+        let revalidated =
+            revalidate_owner_permission(&path, 16, &["BotFather"], "press_button", 5_000)
+                .expect("revalidate");
+        assert!(revalidated.is_some(), "still valid right before the apply");
+        drop(revalidated);
+        // The writer exported a revoke: the same instant no longer authorizes.
+        write_permissions(&path, &[]);
+        let revoked =
+            revalidate_owner_permission(&path, 16, &["BotFather"], "press_button", 5_000)
+                .expect("revalidate");
+        assert!(revoked.is_none(), "a revoked record must deny the apply");
     }
 
     fn sample_send_approval(state: SendApprovalState) -> SendApproval {
