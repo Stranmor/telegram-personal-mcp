@@ -36,6 +36,7 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify};
@@ -930,20 +931,46 @@ fn open_fanout_database(path: &Path) -> Result<Connection, ApprovalBotError> {
     Ok(connection)
 }
 
+struct FanoutPollCancellation(Arc<AtomicBool>);
+
+impl Drop for FanoutPollCancellation {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 fn poll_fanout_updates(
     database_path: &Path,
     offset: i64,
     timeout_seconds: u64,
+    cancelled: &AtomicBool,
 ) -> Result<Vec<ApprovalUpdate>, ApprovalBotError> {
+    poll_fanout_updates_with_wait_hook(database_path, offset, timeout_seconds, cancelled, || {})
+}
+
+fn poll_fanout_updates_with_wait_hook(
+    database_path: &Path,
+    offset: i64,
+    timeout_seconds: u64,
+    cancelled: &AtomicBool,
+    mut before_wait: impl FnMut(),
+) -> Result<Vec<ApprovalUpdate>, ApprovalBotError> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(Vec::new());
+    }
     let connection = open_fanout_database(database_path)?;
     let timeout = Duration::from_secs(timeout_seconds);
     let started = Instant::now();
     loop {
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(Vec::new());
+        }
         let updates = read_fanout_updates(&connection, offset)?;
-        if !updates.is_empty() || started.elapsed() >= timeout {
+        if !updates.is_empty() || started.elapsed() >= timeout || cancelled.load(Ordering::Relaxed) {
             return Ok(updates);
         }
         let remaining = timeout.saturating_sub(started.elapsed());
+        before_wait();
         std::thread::sleep(remaining.min(Duration::from_millis(250)));
     }
 }
@@ -1060,11 +1087,15 @@ impl ApprovalBot for FanoutApprovalBot {
         timeout_seconds: u64,
     ) -> Result<Vec<ApprovalUpdate>, ApprovalBotError> {
         let database_path = Arc::clone(&self.database_path);
-        tokio::task::spawn_blocking(move || {
-            poll_fanout_updates(database_path.as_path(), offset, timeout_seconds)
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation = FanoutPollCancellation(Arc::clone(&cancelled));
+        let result = tokio::task::spawn_blocking(move || {
+            poll_fanout_updates(database_path.as_path(), offset, timeout_seconds, &cancelled)
         })
         .await
-        .map_err(|_| ApprovalBotError::uncertain("FANOUT_READ_UNCERTAIN"))?
+        .map_err(|_| ApprovalBotError::uncertain("FANOUT_READ_UNCERTAIN"))?;
+        drop(cancellation);
+        result
     }
 
     async fn answer_callback(
@@ -7513,6 +7544,48 @@ mod tests {
         assert_eq!(decision.action, ApprovalAction::Approve);
         assert!(updates.get(1).is_some_and(|update| update.decision.is_none()));
     }
+    #[tokio::test]
+    async fn aborting_fanout_poll_stops_its_blocking_wait_promptly() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let path = temporary.path().join("fanout.sqlite");
+        drop(create_fanout_database(&path));
+        let database_path = path.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let (guard_installed_tx, guard_installed_rx) = tokio::sync::oneshot::channel();
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let poll = tokio::spawn(async move {
+            let _cancellation = FanoutPollCancellation(cancelled);
+            let _ = guard_installed_tx.send(());
+            let mut waiting_tx = Some(waiting_tx);
+            let blocking = tokio::task::spawn_blocking(move || {
+                let result = poll_fanout_updates_with_wait_hook(
+                    database_path.as_path(),
+                    0,
+                    50,
+                    worker_cancelled.as_ref(),
+                    || {
+                        if let Some(sender) = waiting_tx.take() {
+                            let _ = sender.send(());
+                        }
+                    },
+                );
+                let _ = finished_tx.send(());
+                result
+            });
+            blocking.await
+        });
+        guard_installed_rx.await.expect("poll cancellation guard installed");
+        waiting_rx.await.expect("blocking poll reached its wait boundary");
+        poll.abort();
+        assert!(poll.await.expect_err("poll task aborted").is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), finished_rx)
+            .await
+            .expect("blocking poll exits promptly after cancellation")
+            .expect("poll completion signal");
+    }
+
 
     #[test]
     fn direct_bot_api_pollers_share_the_hermes_update_lease() {

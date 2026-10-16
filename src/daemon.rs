@@ -30,6 +30,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(20);
 const APP_DIR_NAME: &str = "telegram-personal-mcp";
 const SOCKET_FILE_NAME: &str = "daemon.sock";
 const LOCK_FILE_NAME: &str = "daemon.lock";
@@ -495,13 +496,14 @@ pub async fn run_mcp_daemon(
             }
         }
     };
-
     drop(listener);
     let _ = shutdown_tx.send(true);
-    while let Some(result) = connections.join_next().await {
-        if result.is_err() {
-            tracing::warn!("daemon MCP connection task ended unexpectedly during shutdown");
-        }
+    let forced_connections = drain_connections(&mut connections, SHUTDOWN_GRACE_PERIOD).await;
+    if forced_connections > 0 {
+        tracing::warn!(
+            forced_connections,
+            "daemon forcibly terminated MCP connections after graceful shutdown deadline"
+        );
     }
 
     match accept_error {
@@ -550,6 +552,26 @@ async fn serve_connection(
             }
         }
     }
+}
+
+async fn drain_connections(connections: &mut JoinSet<()>, grace_period: Duration) -> usize {
+    let drained = tokio::time::timeout(grace_period, async {
+        while let Some(result) = connections.join_next().await {
+            if result.is_err() {
+                tracing::warn!("daemon MCP connection task ended unexpectedly during shutdown");
+            }
+        }
+    })
+    .await;
+
+    if drained.is_ok() {
+        return 0;
+    }
+
+    let forced_connections = connections.len();
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
+    forced_connections
 }
 
 async fn proxy_io<R, W>(input: R, output: W, stream: UnixStream) -> io::Result<()>
@@ -1042,6 +1064,24 @@ mod tests {
         relay.await.unwrap().unwrap();
         assert_eq!(relayed, response);
         assert_eq!(fs::read(log_path).unwrap(), b"sentinel");
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_aborts_stalled_connection_before_deadline_overrun() {
+        let mut connections = JoinSet::new();
+        connections.spawn(std::future::pending::<()>());
+
+        let started = Instant::now();
+        let forced = tokio::time::timeout(
+            Duration::from_millis(250),
+            drain_connections(&mut connections, Duration::from_millis(20)),
+        )
+        .await
+        .expect("shutdown drain must finish within its bounded deadline");
+
+        assert_eq!(forced, 1);
+        assert!(connections.is_empty());
+        assert!(started.elapsed() >= Duration::from_millis(20));
     }
 
     #[tokio::test]

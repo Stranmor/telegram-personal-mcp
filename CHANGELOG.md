@@ -48,6 +48,16 @@ and releases use [Semantic Versioning](https://semver.org/).
   calls and zero history requests per hour instead of up to fifty history
   requests per minute. The update-difference poll period is configurable with
   `TELEGRAM_MCP_MESSAGE_CACHE_POLL_INTERVAL_SECS` (default unchanged: 2 s).
+- Daemon shutdown now gives active MCP connections a shared 20-second graceful
+  cancellation window after SIGTERM/SIGINT, then aborts and logs any remaining
+  connection tasks. The deadline applies to connection draining, not the
+  entire process shutdown; later worker cleanup and in-progress SQLite
+  operations remain outside that window. Request handling before shutdown
+  begins is unchanged.
+- Aborting the approval callback worker now signals its blocking SQLite
+  fanout poll to stop waiting at its next 250 ms polling boundary. This bounds
+  the poll wait, not SQLite operations themselves, which retain the existing
+  five-second busy timeout; it is not a hard whole-process shutdown bound.
 
 ### Fixed
 - The approval demo no longer turns a slow host into a failure: it waits for the
