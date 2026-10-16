@@ -346,6 +346,13 @@ pub struct OwnerPermissionUse {
     pub at_unix: i64,
 }
 
+/// A record counts only with the owner's quoted words and their message id.
+fn owner_evidence_present(record: &OwnerPermissionRecord) -> bool {
+    record.evidence.by == "owner"
+        && record.evidence.msg_id > 0
+        && !record.evidence.quote.trim().is_empty()
+}
+
 /// An authorization and its held inter-process mirror lock. Callers keep this
 /// lease through their ledger transition and provider action.
 pub struct OwnerPermissionLease {
