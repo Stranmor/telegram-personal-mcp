@@ -8040,7 +8040,7 @@ impl TelegramClient {
         let telegram_limit = i32::try_from(limit).map_err(|_| {
             TelegramError::InvalidPeer("list_message_reactions.limit is too large".to_string())
         })?;
-        match connected
+        let listed = connected
             .client
             .iter_reaction_users(
                 peer.as_str(),
@@ -8049,26 +8049,11 @@ impl TelegramClient {
                 telegram_limit,
                 offset.map(str::to_string),
             )
-            .await
-        {
-            Ok(page) => Ok(reactions_list_page(page)),
-            Err(error) => match viewer_list_forbidden_reason(&error) {
-                Some(reason) => {
-                    let messages = connected
-                        .client
-                        .get_messages(peer.as_str(), &[message_id])
-                        .await
-                        .map_err(|summary_error| {
-                            TelegramError::Telegram(format!(
-                                "the per-viewer reaction list is forbidden ({reason}), and reading \
-                                 the message summary failed too: {summary_error}"
-                            ))
-                        })?;
-                    Ok(reaction_page_from_summary(message_reactions_of(&messages), Some(reason)))
-                },
-                None => Err(TelegramError::Telegram(error.to_string())),
-            },
-        }
+            .await;
+        reaction_read_outcome(listed, async || {
+            connected.client.get_messages(peer.as_str(), &[message_id]).await
+        })
+        .await
     }
 
     pub async fn get_default_reaction(
@@ -16825,6 +16810,35 @@ fn reactions_list_page(page: tl::types::messages::MessageReactionsList) -> Messa
     }
 }
 
+/// The reaction read as this tool must answer it: the per-viewer list when
+/// Telegram allows it, the message's own summary when Telegram refuses that list
+/// (broadcast channels answer `403 BROADCAST_FORBIDDEN`), the error otherwise.
+/// `fetch_summary` runs only on the forbidden refusal, so the common path pays
+/// no extra request.
+async fn reaction_read_outcome(
+    listed: Result<tl::types::messages::MessageReactionsList, ferogram::InvocationError>,
+    fetch_summary: impl AsyncFnOnce() -> Result<
+        Vec<ferogram::update::IncomingMessage>,
+        ferogram::InvocationError,
+    >,
+) -> Result<MessageReactionPage, TelegramError> {
+    match listed {
+        Ok(page) => Ok(reactions_list_page(page)),
+        Err(error) => match viewer_list_forbidden_reason(&error) {
+            Some(reason) => {
+                let messages = fetch_summary().await.map_err(|summary_error| {
+                    TelegramError::Telegram(format!(
+                        "the per-viewer reaction list is forbidden ({reason}), and reading the \
+                         message summary failed too: {summary_error}"
+                    ))
+                })?;
+                Ok(reaction_page_from_summary(message_reactions_of(&messages), Some(reason)))
+            },
+            None => Err(TelegramError::Telegram(error.to_string())),
+        },
+    }
+}
+
 /// The message's own reaction summary as a tool page, used where Telegram
 /// refuses the per-viewer list: `counts` carries per-reaction totals (with
 /// `chosen` marking this account's own reaction) and `reactions` holds only
@@ -20794,5 +20808,47 @@ mod tests {
         assert!(page.reactions.is_empty());
         assert_eq!(page.next_offset, None);
         assert_eq!(page.viewer_list_forbidden.as_deref(), Some("BROADCAST_FORBIDDEN"));
+    }
+
+    fn rpc_error(code: i32, name: &str) -> ferogram::InvocationError {
+        ferogram::InvocationError::Rpc(ferogram::RpcError {
+            code,
+            name: name.to_string(),
+            value: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_forbidden_list_answers_from_the_message_summary_instead_of_failing() {
+        let page =
+            reaction_read_outcome(Err(rpc_error(403, "BROADCAST_FORBIDDEN")), async || Ok(Vec::new()))
+                .await
+                .expect("a forbidden per-viewer list must fall back to the message summary");
+        assert_eq!(page.viewer_list_forbidden.as_deref(), Some("BROADCAST_FORBIDDEN"));
+        assert_eq!(page.total_count, 0);
+        assert!(page.counts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_forbidden_list_keeps_both_reasons_when_the_summary_read_fails_too() {
+        let outcome = reaction_read_outcome(
+            Err(rpc_error(403, "BROADCAST_FORBIDDEN")),
+            async || Err(rpc_error(420, "FLOOD_WAIT")),
+        )
+        .await;
+        let error = outcome.expect_err("a failing summary read stays an error").to_string();
+        assert!(error.contains("BROADCAST_FORBIDDEN"), "{error}");
+        assert!(error.contains("FLOOD_WAIT"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn any_other_refusal_stays_an_error_without_reading_the_summary() {
+        let outcome = reaction_read_outcome(
+            Err(rpc_error(400, "MSG_ID_INVALID")),
+            async || panic!("the summary must not be read for a non-forbidden refusal"),
+        )
+        .await;
+        let error = outcome.expect_err("other refusals stay errors").to_string();
+        assert!(error.contains("MSG_ID_INVALID"), "{error}");
     }
 }
