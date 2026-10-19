@@ -3536,6 +3536,13 @@ struct GetMessageResult {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+struct GetMessageHtmlResult {
+    chat_id: String,
+    message_id: i32,
+    html: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 struct CachedMessageView {
     chat_id: String,
     message: MessageSummary,
@@ -6674,6 +6681,49 @@ impl McpServer {
             .await;
         }
         Ok(Json(ToolOutcome::success(GetMessageResult { message })))
+    }
+
+    /// Return the exact Telegram HTML rendering of one message, entities
+    /// included, so operators can verify which markup clients actually get.
+    #[tool(annotations(
+        title = "Get Telegram message HTML",
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true
+    ))]
+    async fn get_message_html(
+        &self,
+        Parameters(args): Parameters<GetMessageArgs>,
+    ) -> Result<Json<ToolOutcome<GetMessageHtmlResult>>, Json<ToolOutcome<GetMessageHtmlResult>>>
+    {
+        validate_chat_id(&args.chat_id, "get_message_html")
+            .map_err(|error| Json(ToolOutcome::failure(error)))?;
+        if args.message_id <= 0 {
+            return Err(Json(ToolOutcome::failure(ToolFailure::invalid_argument(
+                "get_message_html.message_id must be positive",
+            ))));
+        }
+        let (_, session) = self
+            .backend
+            .get_me(None)
+            .await
+            .map_err(|error| Json(ToolOutcome::failure(error.into())))?;
+        let canonical_chat_id = self
+            .backend
+            .resolve_chat_id(Some(session.clone()), &args.chat_id.0)
+            .await
+            .map_err(|error| Json(ToolOutcome::failure(error.into())))?;
+        let html = self
+            .backend
+            .get_message_html(Some(session), &canonical_chat_id, args.message_id)
+            .await
+            .map_err(|error| Json(ToolOutcome::failure(error.into())))?;
+        Ok(Json(ToolOutcome::success(GetMessageHtmlResult {
+            chat_id: canonical_chat_id,
+            message_id: args.message_id,
+            html,
+        })))
     }
 
     /// Inspect every typed button on one exact message, or on the newest recent message with buttons.

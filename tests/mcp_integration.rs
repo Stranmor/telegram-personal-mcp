@@ -39,7 +39,7 @@ async fn official_mcp_transport_exposes_structured_tools_and_typed_errors() -> a
     let client = ().serve(client_transport).await?;
 
     let tools = client.list_all_tools().await?;
-    assert_eq!(tools.len(), 309);
+    assert_eq!(tools.len(), 310);
     assert!(
         tools
             .iter()
