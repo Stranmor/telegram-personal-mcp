@@ -208,6 +208,7 @@ struct FakeState {
     next_chat_id: i64,
     next_chat_photo_id: i64,
     messages: HashMap<i64, Vec<MessageSummary>>,
+    message_html: HashMap<(i64, i32), String>,
     history_calls: usize,
     history_rows_returned: usize,
     list_dialogs_calls: usize,
@@ -2589,6 +2590,7 @@ impl FakeTelegramBackend {
                 next_chat_id: 800,
                 next_chat_photo_id: 60_000,
                 messages,
+                message_html: HashMap::new(),
                 history_calls: 0,
                 history_rows_returned: 0,
                 list_dialogs_calls: 0,
@@ -5852,6 +5854,9 @@ impl TelegramBackend for FakeTelegramBackend {
             .get(&canonical_id)
             .and_then(|messages| messages.iter().find(|message| message.message_id == message_id))
             .ok_or_else(|| TelegramError::MessageNotFound(format!("{chat_id}:{message_id}")))?;
+        if let Some(html) = state.message_html.get(&(canonical_id, message_id)) {
+            return Ok(html.clone());
+        }
         Ok(ferogram::parsers::generate_html(message.text.as_deref().unwrap_or_default(), &[]))
     }
 
@@ -11529,11 +11534,26 @@ impl TelegramBackend for FakeTelegramBackend {
         chat_id: &str,
         message_id: i32,
         text: &str,
+        parse_mode: CaptionParseMode,
     ) -> Result<i32, TelegramError> {
         let mut state = self.state.lock().await;
         state.edit_calls = state.edit_calls.saturating_add(1);
         let canonical_id = Self::resolve_dialog(&state.dialogs, chat_id)
             .ok_or_else(|| TelegramError::PeerNotFound(chat_id.to_string()))?;
+        let parsed = match parse_mode {
+            CaptionParseMode::Plain => ferogram::InputMessage::text(text),
+            CaptionParseMode::Markdown => ferogram::InputMessage::markdown(text),
+            CaptionParseMode::Html => ferogram::InputMessage::html(text),
+            CaptionParseMode::RichMarkdown => {
+                return Err(TelegramError::Telegram(
+                    "rich_markdown parse mode is not supported for message edits".to_string(),
+                ));
+            },
+        };
+        let html = ferogram::parsers::generate_html(
+            &parsed.text,
+            parsed.entities.as_deref().unwrap_or_default(),
+        );
         let message = state
             .messages
             .get_mut(&canonical_id)
@@ -11541,8 +11561,9 @@ impl TelegramBackend for FakeTelegramBackend {
                 messages.iter_mut().find(|message| message.message_id == message_id)
             })
             .ok_or_else(|| TelegramError::MessageNotFound(format!("{chat_id}:{message_id}")))?;
-        message.text = Some(text.to_string());
+        message.text = Some(parsed.text);
         message.edit_date = Some(1_700_001_000_i32.saturating_add(message_id));
+        state.message_html.insert((canonical_id, message_id), html);
         Ok(message_id)
     }
 

@@ -2097,8 +2097,8 @@ fn mutation_action_approval_deadline_unix(action: &MutationAction) -> Option<i64
 mod tests {
     use super::*;
     use crate::domain::{
-        ChatMemberRole, ContactSummary, InviteChatBinding, InviteChatKind, InviteUserBinding,
-        MutationMessageSnapshot,
+        CaptionParseMode, ChatMemberRole, ContactSummary, InviteChatBinding, InviteChatKind,
+        InviteUserBinding, MutationMessageSnapshot,
     };
 
     #[test]
@@ -2124,6 +2124,7 @@ mod tests {
                 restore: None,
             },
             text: "Updated".to_string(),
+            parse_mode: CaptionParseMode::Plain,
         };
         let prepared = ledger.prepare(7, action.clone(), "abc".to_string()).expect("prepare");
         let requested = ledger

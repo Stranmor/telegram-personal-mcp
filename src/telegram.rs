@@ -8200,12 +8200,13 @@ impl TelegramClient {
         chat_id: &str,
         message_id: i32,
         text: &str,
+        parse_mode: CaptionParseMode,
     ) -> Result<i32, TelegramError> {
         let connected = self.connected(session_path).await?;
         let peer = Self::resolve_peer_ref(&connected.client, chat_id).await?;
         connected
             .client
-            .edit_message(peer.as_str(), message_id, text)
+            .edit_message(peer.as_str(), message_id, edit_text_input(text, parse_mode)?)
             .await
             .map_err(send_invocation_error)?;
         Ok(message_id)
@@ -11915,8 +11916,10 @@ impl TelegramBackend for TelegramClient {
         chat_id: &str,
         message_id: i32,
         text: &str,
+        parse_mode: CaptionParseMode,
     ) -> Result<i32, TelegramError> {
-        TelegramClient::edit_message(self, session_path, chat_id, message_id, text).await
+        TelegramClient::edit_message(self, session_path, chat_id, message_id, text, parse_mode)
+            .await
     }
 
     async fn delete_messages(
@@ -17199,6 +17202,19 @@ fn caption_input(caption: &str, parse_mode: CaptionParseMode) -> InputMessage {
             InputMessage::text("")
                 .rich_text(ferogram::parsers::parse_rich_markdown(&normalized_caption))
         },
+    }
+}
+
+/// Edited messages carry the same entity payload as send paths; rich text is
+/// rejected because `messages.editMessage` has no rich-message field here.
+fn edit_text_input(text: &str, parse_mode: CaptionParseMode) -> Result<InputMessage, TelegramError> {
+    match parse_mode {
+        CaptionParseMode::Plain => Ok(InputMessage::text(text)),
+        CaptionParseMode::Markdown => Ok(InputMessage::markdown(text)),
+        CaptionParseMode::Html => Ok(InputMessage::html(text)),
+        CaptionParseMode::RichMarkdown => Err(TelegramError::Telegram(
+            "rich_markdown parse mode is not supported for message edits".to_string(),
+        )),
     }
 }
 

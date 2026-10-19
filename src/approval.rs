@@ -3857,22 +3857,47 @@ fn render_mutation_card(card: &MutationApprovalCard) -> Result<String, ApprovalB
                 _ => "—".to_string(),
             },
         ),
-        MutationAction::EditMessage { chat_id, before, text } => (
-            "ИЗМЕНЕНИЕ СООБЩЕНИЯ",
-            format!("Чат: {chat_id}\nСообщение: {}", before.message_id),
-            format!(
-                "Текущий точный текст:\n────────────\n{}\n────────────\n\nНовый точный текст:\n────────────\n{text}\n────────────\n\nИсходный edit_date: {}\nМедиа: {}",
-                before.text.as_deref().unwrap_or("[нет текста]"),
-                before.edit_date_unix.map_or_else(|| "нет".to_string(), |value| value.to_string()),
-                before.media_type.as_deref().unwrap_or("нет")
-            ),
-            match &approval.result {
-                Some(crate::domain::MutationResult::MessageEdited { message_id }) => {
-                    format!("Изменено message_id: {message_id}")
+        MutationAction::EditMessage { chat_id, before, text, parse_mode } => {
+            let parsed_text = match parse_mode {
+                crate::domain::CaptionParseMode::Plain => text.clone(),
+                crate::domain::CaptionParseMode::Markdown => {
+                    ferogram::InputMessage::markdown(text).text
                 },
-                _ => "—".to_string(),
-            },
-        ),
+                crate::domain::CaptionParseMode::Html => ferogram::InputMessage::html(text).text,
+                crate::domain::CaptionParseMode::RichMarkdown => String::new(),
+            };
+            let parse_note = match parse_mode {
+                crate::domain::CaptionParseMode::Plain => "",
+                crate::domain::CaptionParseMode::Markdown => " (разметка: md)",
+                crate::domain::CaptionParseMode::Html => " (разметка: html → сущности Telegram)",
+                crate::domain::CaptionParseMode::RichMarkdown => " (разметка: rich_markdown)",
+            };
+            let visible_block = if matches!(parse_mode, crate::domain::CaptionParseMode::Plain) {
+                String::new()
+            } else {
+                format!(
+                    "\n\nВидимый текст после разбора:\n────────────\n{parsed_text}\n────────────"
+                )
+            };
+            (
+                "ИЗМЕНЕНИЕ СООБЩЕНИЯ",
+                format!("Чат: {chat_id}\nСообщение: {}", before.message_id),
+                format!(
+                    "Текущий точный текст:\n────────────\n{}\n────────────\n\nНовый точный текст{parse_note}:\n────────────\n{text}\n────────────{visible_block}\n\nИсходный edit_date: {}\nМедиа: {}",
+                    before.text.as_deref().unwrap_or("[нет текста]"),
+                    before
+                        .edit_date_unix
+                        .map_or_else(|| "нет".to_string(), |value| value.to_string()),
+                    before.media_type.as_deref().unwrap_or("нет")
+                ),
+                match &approval.result {
+                    Some(crate::domain::MutationResult::MessageEdited { message_id }) => {
+                        format!("Изменено message_id: {message_id}")
+                    },
+                    _ => "—".to_string(),
+                },
+            )
+        },
         MutationAction::DeleteMessages { chat_id, messages, revoke } => (
             "УДАЛЕНИЕ СООБЩЕНИЙ",
             format!("Чат: {chat_id}"),

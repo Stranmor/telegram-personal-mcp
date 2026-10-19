@@ -2131,6 +2131,165 @@ async fn mutation_buttons_apply_once_and_cancel_without_side_effects() -> anyhow
 }
 
 #[tokio::test]
+async fn html_edit_creates_tel_entities_and_keeps_the_visible_text() -> anyhow::Result<()> {
+    let backend = Arc::new(FakeTelegramBackend::fixture());
+    let bot = Arc::new(FakeApprovalBot::default());
+    let temp = tempfile::tempdir()?;
+    let state_db_path = temp.path().join("state.sqlite");
+    let server = McpServer::with_approval(
+        backend.clone(),
+        McpServerSettings {
+            attachment_cache_dir: temp.path().join("attachments"),
+            max_download_bytes: 1024 * 1024,
+            max_upload_bytes: 1024 * 1024,
+            state_db_path: state_db_path.clone(),
+        },
+        ApprovalPolicy {
+            approval_chat_id: 700,
+            approval_user_id: 700,
+            ttl_seconds: 3_600,
+            poll_timeout_seconds: 1,
+            owner_grant_file: None,
+            owner_permission_file: None,
+        },
+        bot.clone(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let worker = server.start_approval_worker()?.expect("approval worker");
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = ().serve(client_transport).await?;
+
+    let html = "Release <b>passed</b> and deployed: \
+                <a href=\"tel:+79193773549\">8 919 377-35-49</a>";
+    let prepared = client
+        .call_tool(
+            CallToolRequestParams::new("prepare_edit_message").with_arguments(
+                json!({
+                    "chat_id": "-202",
+                    "message_id": 21,
+                    "text": html,
+                    "parse_mode": "html"
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(prepared.is_error, Some(false));
+    assert_eq!(
+        prepared
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/data/action/parse_mode"))
+            .and_then(|value| value.as_str()),
+        Some("html")
+    );
+    let mutation_id = prepared
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/mutation_id"))
+        .and_then(|value| value.as_str())
+        .expect("mutation id")
+        .to_string();
+    let payload_sha256 = prepared
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/payload_sha256"))
+        .and_then(|value| value.as_str())
+        .expect("payload hash")
+        .to_string();
+    let requested = client
+        .call_tool(
+            CallToolRequestParams::new("request_mutation_approval").with_arguments(
+                json!({
+                    "purpose": "тест: подготовка мутации к подтверждению",
+                    "mutation_id": mutation_id,
+                    "approved_payload_sha256": payload_sha256
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(requested.is_error, Some(false));
+    let approval_id = requested
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/approval_id"))
+        .and_then(|value| value.as_str())
+        .expect("approval id")
+        .to_string();
+    let approval_message_id = requested
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/approval_message_id"))
+        .and_then(|value| value.as_i64())
+        .expect("approval message id");
+    bot.push_mutation_decision(
+        &approval_id,
+        ApprovalAction::Approve,
+        700,
+        700,
+        approval_message_id,
+    )
+    .await;
+    wait_for_answers(&bot, 1).await?;
+    wait_for_mutation_state(&state_db_path, &approval_id, MutationApprovalState::Applied).await?;
+
+    let edited = backend.get_message(None, "-202", 21).await?.expect("edited message");
+    assert_eq!(
+        edited.text.as_deref(),
+        Some("Release passed and deployed: 8 919 377-35-49")
+    );
+    let rendered = backend.get_message_html(None, "-202", 21).await?;
+    assert!(rendered.contains("<b>passed</b>"), "{rendered}");
+    assert!(
+        rendered.contains("<a href=\"tel:+79193773549\">8 919 377-35-49</a>"),
+        "{rendered}"
+    );
+    assert_eq!(backend.mutation_call_counts().await, (1, 0));
+
+    let unchanged = client
+        .call_tool(
+            CallToolRequestParams::new("prepare_edit_message").with_arguments(
+                json!({
+                    "chat_id": "-202",
+                    "message_id": 21,
+                    "text": html,
+                    "parse_mode": "html"
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(unchanged.is_error, Some(true));
+    assert!(
+        unchanged
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/error/message"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|message| message.contains("already matches")),
+        "{:?}",
+        unchanged.structured_content
+    );
+
+    client.cancel().await?;
+    server_task.await??;
+    worker.abort();
+    let _ = worker.await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn changed_message_snapshot_blocks_an_approved_edit() -> anyhow::Result<()> {
     let backend = Arc::new(FakeTelegramBackend::fixture());
     let bot = Arc::new(FakeApprovalBot::default());

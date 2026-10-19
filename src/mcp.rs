@@ -3036,7 +3036,15 @@ struct CancelSendApprovalArgs {
 struct PrepareEditMessageArgs {
     chat_id: ChatId,
     message_id: i32,
+    #[schemars(
+        description = "New message body. With parse_mode=html/md this is the markup source; Telegram entities are built from it exactly like the send paths, while the visible text stays the parsed text."
+    )]
     text: String,
+    #[serde(default, alias = "parseMode")]
+    #[schemars(
+        description = "Optional Telegram parse mode for `text`: plain (default), md, or html. html turns <a href=\"tel:+7...\">…</a>, <b>, <i>, etc. into message entities; rich_markdown is not supported for edits."
+    )]
+    parse_mode: CaptionParseMode,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -13830,7 +13838,15 @@ impl McpServer {
                 "prepare_edit_message.message_id must be positive",
             ))));
         }
-        validate_mutation_text(&args.text, "prepare_edit_message.text")
+        let parse_mode = args.parse_mode;
+        if matches!(parse_mode, CaptionParseMode::RichMarkdown) {
+            return Err(Json(ToolOutcome::failure(ToolFailure::invalid_argument(
+                "prepare_edit_message.parse_mode rich_markdown is not supported for message edits",
+            ))));
+        }
+        let requested = edit_input_message(&args.text, parse_mode)
+            .map_err(|error| Json(ToolOutcome::failure(error)))?;
+        validate_mutation_text(&requested.text, "prepare_edit_message.text")
             .map_err(|error| Json(ToolOutcome::failure(error)))?;
         let (account, selected_session) = self
             .backend
@@ -13844,7 +13860,7 @@ impl McpServer {
             .map_err(|error| Json(ToolOutcome::failure(error.into())))?;
         let message = self
             .backend
-            .get_message(Some(selected_session), &canonical_chat_id, args.message_id)
+            .get_message(Some(selected_session.clone()), &canonical_chat_id, args.message_id)
             .await
             .map_err(|error| Json(ToolOutcome::failure(error.into())))?
             .ok_or_else(|| {
@@ -13861,7 +13877,17 @@ impl McpServer {
                 false,
             ))));
         }
-        if message.text.as_deref() == Some(args.text.as_str()) {
+        let already_current = if matches!(parse_mode, CaptionParseMode::Plain) {
+            message.text.as_deref() == Some(args.text.as_str())
+        } else {
+            let current_html = self
+                .backend
+                .get_message_html(Some(selected_session), &canonical_chat_id, args.message_id)
+                .await
+                .map_err(|error| Json(ToolOutcome::failure(error.into())))?;
+            edit_input_matches(&current_html, &requested)
+        };
+        if already_current {
             return Err(Json(ToolOutcome::failure(ToolFailure::new(
                 "NO_CHANGE",
                 "the requested text already matches the current Telegram message",
@@ -13872,6 +13898,7 @@ impl McpServer {
             chat_id: canonical_chat_id,
             before: mutation_snapshot(&message),
             text: args.text,
+            parse_mode,
         };
         let payload_sha256 = mutation_payload_hash(account.user_id, &action)
             .map_err(|error| Json(ToolOutcome::failure(error)))?;
@@ -20014,15 +20041,37 @@ impl McpServer {
                     ))
                 }
             },
-            MutationAction::EditMessage { chat_id, before, text } => {
+            MutationAction::EditMessage { chat_id, before, text, parse_mode } => {
+                let expected_text = parsed_caption_text(text, parse_mode);
+                let requested = edit_input_message(text, parse_mode).map_err(|error| {
+                    mutation_outcome_unknown(format!(
+                        "the approved edit payload no longer parses: {}",
+                        error.message
+                    ))
+                })?;
                 let current = self
                     .backend
                     .get_message(Some(selected_session.clone()), chat_id, before.message_id)
                     .await
                     .map_err(|error| mutation_observation_failure(error, recovering_unknown))?;
-                if current.as_ref().and_then(|message| message.text.as_deref())
-                    == Some(text.as_str())
-                {
+                let already_current = if matches!(parse_mode, CaptionParseMode::Plain) {
+                    current.as_ref().and_then(|message| message.text.as_deref())
+                        == Some(text.as_str())
+                } else {
+                    match self
+                        .backend
+                        .get_message_html(
+                            Some(selected_session.clone()),
+                            chat_id,
+                            before.message_id,
+                        )
+                        .await
+                    {
+                        Ok(current_html) => edit_input_matches(&current_html, &requested),
+                        Err(_) => false,
+                    }
+                };
+                if already_current {
                     return Ok(MutationResult::MessageEdited { message_id: before.message_id });
                 }
                 let current = current.ok_or_else(|| {
@@ -20044,7 +20093,13 @@ impl McpServer {
                 }
                 match self
                     .backend
-                    .edit_message(Some(selected_session.clone()), chat_id, before.message_id, text)
+                    .edit_message(
+                        Some(selected_session.clone()),
+                        chat_id,
+                        before.message_id,
+                        text,
+                        parse_mode,
+                    )
                     .await
                 {
                     Ok(message_id) if message_id == before.message_id => {},
@@ -20061,16 +20116,32 @@ impl McpServer {
                 }
                 let readback = self
                     .backend
-                    .get_message(Some(selected_session), chat_id, before.message_id)
+                    .get_message(Some(selected_session.clone()), chat_id, before.message_id)
                     .await
                     .map_err(|error| mutation_outcome_unknown(error.to_string()))?;
-                if readback.as_ref().and_then(|message| message.text.as_deref())
-                    == Some(text.as_str())
-                {
+                let content_matches = if matches!(parse_mode, CaptionParseMode::Plain) {
+                    readback.as_ref().and_then(|message| message.text.as_deref())
+                        == Some(text.as_str())
+                } else {
+                    let text_matches = readback
+                        .as_ref()
+                        .and_then(|message| message.text.as_deref())
+                        == Some(expected_text.as_str());
+                    text_matches
+                        && match self
+                            .backend
+                            .get_message_html(Some(selected_session), chat_id, before.message_id)
+                            .await
+                        {
+                            Ok(readback_html) => edit_input_contains(&readback_html, &requested),
+                            Err(_) => false,
+                        }
+                };
+                if content_matches {
                     Ok(MutationResult::MessageEdited { message_id: before.message_id })
                 } else {
                     Err(mutation_outcome_unknown(format!(
-                        "Telegram did not return the approved text for message {} after editing",
+                        "Telegram did not return the approved content for message {} after editing",
                         before.message_id
                     )))
                 }
@@ -37407,6 +37478,49 @@ fn parsed_caption_text(caption: &str, parse_mode: CaptionParseMode) -> String {
         CaptionParseMode::Html => ferogram::InputMessage::html(caption).text,
         CaptionParseMode::RichMarkdown => String::new(),
     }
+}
+
+/// Builds the exact entity payload an edit will send, by the same parser the
+/// send paths use. Rich text has no field on `messages.editMessage`.
+fn edit_input_message(
+    text: &str,
+    parse_mode: CaptionParseMode,
+) -> Result<ferogram::InputMessage, ToolFailure> {
+    match parse_mode {
+        CaptionParseMode::Plain => Ok(ferogram::InputMessage::text(text)),
+        CaptionParseMode::Markdown => Ok(ferogram::InputMessage::markdown(text)),
+        CaptionParseMode::Html => Ok(ferogram::InputMessage::html(text)),
+        CaptionParseMode::RichMarkdown => Err(ToolFailure::invalid_argument(
+            "parse_mode rich_markdown is not supported for message edits",
+        )),
+    }
+}
+
+/// Exact equality of the visible text and the full entity list, used to prove
+/// that preparing an edit would change nothing (parsed against Telegram's own
+/// HTML rendering of the current message).
+fn edit_input_matches(current_html: &str, requested: &ferogram::InputMessage) -> bool {
+    let current = ferogram::InputMessage::html(current_html);
+    current.text == requested.text
+        && current.entities.unwrap_or_default() == requested.entities.clone().unwrap_or_default()
+}
+
+/// Readback predicate for markup edits: the visible text must match and every
+/// requested entity must be present. Telegram may add automatic entities
+/// (url/mention/hashtag) that the HTML renderer does not reproduce.
+fn edit_input_contains(current_html: &str, requested: &ferogram::InputMessage) -> bool {
+    let current = ferogram::InputMessage::html(current_html);
+    if current.text != requested.text {
+        return false;
+    }
+    let mut observed = current.entities.unwrap_or_default();
+    for entity in requested.entities.as_deref().unwrap_or_default() {
+        let Some(position) = observed.iter().position(|candidate| candidate == entity) else {
+            return false;
+        };
+        observed.swap_remove(position);
+    }
+    true
 }
 
 fn text_readback_matches(actual: Option<&str>, expected: &str) -> bool {
