@@ -18661,7 +18661,9 @@ mod tests {
                     <a href=\"tel:+79193773549\">8 919 377-35-49</a>";
         let message = edit_text_input(html, CaptionParseMode::Html).expect("html edit input");
         assert_eq!(message.text, "Запись по телефону: 8 919 377-35-49");
-        let phone_at = message.text.find("8 919 377-35-49").expect("phone") as i32;
+        let phone_at = message.text[..message.text.find("8 919 377-35-49").expect("phone")]
+            .encode_utf16()
+            .count() as i32;
         let entities = message.entities.expect("entities");
         assert!(
             entities.iter().any(|entity| matches!(entity, tl::enums::MessageEntity::Bold(_)))
@@ -18680,7 +18682,7 @@ mod tests {
     #[test]
     fn phone_entities_render_as_canonical_tel_anchors() {
         let text = "Звоните: 8 919 377-35-49";
-        let offset = text.find("8 919").expect("phone") as i32;
+        let offset = text[..text.find("8 919").expect("phone")].encode_utf16().count() as i32;
         let entities = vec![tl::enums::MessageEntity::Phone(tl::types::MessageEntityPhone {
             offset,
             length: 15,
