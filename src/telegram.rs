@@ -18569,6 +18569,22 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn edit_text_input_turns_tel_anchors_into_text_url_entities() {
+        let html = "<b>Запись</b> по телефону: \
+                    <a href=\"tel:+79193773549\">8 919 377-35-49</a>";
+        let message = edit_text_input(html, CaptionParseMode::Html).expect("html edit input");
+        assert_eq!(message.text, "Запись по телефону: 8 919 377-35-49");
+        let entities = message.entities.expect("entities");
+        assert!(
+            entities.iter().any(|entity| matches!(entity, tl::enums::MessageEntity::Bold(_)))
+        );
+        assert!(entities.iter().any(|entity| matches!(
+            entity,
+            tl::enums::MessageEntity::TextUrl(url) if url.url == "tel:+79193773549"
+        )));
+    }
+
+    #[test]
     fn rich_markdown_hash_tags_are_not_promoted_to_headings() {
         let source = "# Заголовок\n\n#нейродинамика #осанка\n### Подзаголовок";
         let normalized = normalize_rich_markdown(source);
