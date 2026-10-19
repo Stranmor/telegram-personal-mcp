@@ -37487,14 +37487,40 @@ fn edit_input_message(
     text: &str,
     parse_mode: CaptionParseMode,
 ) -> Result<ferogram::InputMessage, ToolFailure> {
-    match parse_mode {
-        CaptionParseMode::Plain => Ok(ferogram::InputMessage::text(text)),
-        CaptionParseMode::Markdown => Ok(ferogram::InputMessage::markdown(text)),
-        CaptionParseMode::Html => Ok(ferogram::InputMessage::html(text)),
-        CaptionParseMode::RichMarkdown => Err(ToolFailure::invalid_argument(
-            "parse_mode rich_markdown is not supported for message edits",
-        )),
-    }
+    let mut message = match parse_mode {
+        CaptionParseMode::Plain => ferogram::InputMessage::text(text),
+        CaptionParseMode::Markdown => ferogram::InputMessage::markdown(text),
+        CaptionParseMode::Html => ferogram::InputMessage::html(text),
+        CaptionParseMode::RichMarkdown => {
+            return Err(ToolFailure::invalid_argument(
+                "parse_mode rich_markdown is not supported for message edits",
+            ));
+        },
+    };
+    normalize_tel_entities(&mut message);
+    Ok(message)
+}
+
+/// The Telegram backend sends `tel:` anchors as phone entities (the server
+/// drops `text_url` with a `tel:` URL) and renders them back as `tel:`
+/// anchors, so both sides of a readback comparison use the canonical URL.
+fn normalize_tel_entities(message: &mut ferogram::InputMessage) {
+    let Some(entities) = message.entities.take() else {
+        return;
+    };
+    let entities = entities
+        .into_iter()
+        .map(|entity| match entity {
+            ferogram::tl::enums::MessageEntity::TextUrl(mut url) => {
+                if let Some(canonical) = crate::telegram::canonical_tel_url(&url.url) {
+                    url.url = canonical;
+                }
+                ferogram::tl::enums::MessageEntity::TextUrl(url)
+            },
+            other => other,
+        })
+        .collect();
+    message.entities = Some(entities);
 }
 
 /// Exact equality of the visible text and the full entity list, used to prove
