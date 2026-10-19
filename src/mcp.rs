@@ -20042,6 +20042,7 @@ impl McpServer {
                 }
             },
             MutationAction::EditMessage { chat_id, before, text, parse_mode } => {
+                let parse_mode = *parse_mode;
                 let expected_text = parsed_caption_text(text, parse_mode);
                 let requested = edit_input_message(text, parse_mode).map_err(|error| {
                     mutation_outcome_unknown(format!(
