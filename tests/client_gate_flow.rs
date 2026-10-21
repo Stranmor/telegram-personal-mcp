@@ -26,6 +26,8 @@ use telegram_personal_mcp::{
 };
 
 const CLIENT_CHAT: &str = "-100777001";
+/// Чат, который знает фикстура бэкенда: положительный путь проверяется на реальном адресате.
+const FIXTURE_CLIENT_CHAT: &str = "-202";
 
 fn now_unix() -> i64 {
     SystemTime::now()
@@ -167,7 +169,9 @@ async fn client_text_with_bound_verdict_is_prepared() -> anyhow::Result<()> {
     let backend = Arc::new(FakeTelegramBackend::fixture());
     let bot = Arc::new(FakeApprovalBot::default());
     let temp = tempfile::tempdir()?;
-    write_targets(temp.path(), &[CLIENT_CHAT]);
+    // Класс «клиент» проверяем на чате, который бэкенд знает: отказ гейта и отказ резолвера
+    // различаются кодом, поэтому положительный путь требует реального адресата фикстуры.
+    write_targets(temp.path(), &[FIXTURE_CLIENT_CHAT]);
     let text = "Текст поста, прошедший независимый проход";
     let verdict = write_verdict(temp.path(), text);
     let server = McpServer::with_approval(
@@ -199,7 +203,7 @@ async fn client_text_with_bound_verdict_is_prepared() -> anyhow::Result<()> {
     let prepared = client
         .call_tool(CallToolRequestParams::new("prepare_message").with_arguments(
             json!({
-                "chat_id": CLIENT_CHAT,
+                "chat_id": FIXTURE_CLIENT_CHAT,
                 "text": text,
                 "source": {"kind": "self_originated"},
                 "outbound_verdict": verdict,
@@ -290,7 +294,7 @@ async fn client_media_with_bound_receipt_is_prepared() -> anyhow::Result<()> {
     let backend = Arc::new(FakeTelegramBackend::fixture());
     let bot = Arc::new(FakeApprovalBot::default());
     let temp = tempfile::tempdir()?;
-    write_targets(temp.path(), &[CLIENT_CHAT]);
+    write_targets(temp.path(), &[FIXTURE_CLIENT_CHAT]);
     let artifact = temp.path().join("frame.png");
     let bytes = b"\x89PNG\r\n\x1a\napproved-frame";
     std::fs::write(&artifact, bytes)?;
@@ -325,7 +329,7 @@ async fn client_media_with_bound_receipt_is_prepared() -> anyhow::Result<()> {
     let prepared = client
         .call_tool(CallToolRequestParams::new("prepare_file_message").with_arguments(
             json!({
-                "chat_id": CLIENT_CHAT,
+                "chat_id": FIXTURE_CLIENT_CHAT,
                 "file_path": artifact,
                 "caption": "Кадр, прошедший независимого критика",
                 "mode": "photo",
