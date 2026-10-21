@@ -3101,6 +3101,11 @@ struct PrepareEditMessageArgs {
         description = "Optional Telegram parse mode for `text`: plain (default), md, or html. html turns <a href=\"tel:+7...\">…</a>, <b>, <i>, etc. into message entities; rich_markdown is not supported for edits."
     )]
     parse_mode: CaptionParseMode,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the orch-outbound-verdict/v1 JSON for the new text. Mandatory when the target is a registered client: run `orch outbound check --client --text <same text> --verdict-out <file>` first."
+    )]
+    outbound_verdict: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -3244,6 +3249,11 @@ struct PrepareEditScheduledMessageArgs {
     schedule_at_unix: Option<i32>,
     #[serde(default)]
     send_when_online: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the orch-outbound-verdict/v1 JSON for `text`. Mandatory with `text` when the target is a registered client: run `orch outbound check --client --text <same text> --verdict-out <file>` first."
+    )]
+    outbound_verdict: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -3299,6 +3309,11 @@ struct PrepareCreatePollArgs {
     silent: bool,
     #[serde(default)]
     noforwards: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the orch-outbound-verdict/v1 JSON bound to the visible poll text: question, then each answer, then the solution, one per line. Mandatory when the target is a registered client: run `orch outbound check --client --text <same joined text> --verdict-out <file>` first."
+    )]
+    outbound_verdict: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -8253,6 +8268,7 @@ impl McpServer {
             "prepare_edit_scheduled_message",
         )
         .map_err(|error| Json(ToolOutcome::failure(error)))?;
+        let text_changed = args.text.is_some();
         let text = args.text.unwrap_or_else(|| current.text.clone().unwrap_or_default());
         if current.text.as_deref().unwrap_or_default() == text && current.date == schedule_date_unix
         {
@@ -8264,6 +8280,17 @@ impl McpServer {
                 ),
                 false,
             ))));
+        }
+        if text_changed {
+            enforce_text_gate(
+                &self.settings,
+                self.owner_grant_file(),
+                "prepare_edit_scheduled_message",
+                args.chat_id.0.as_str(),
+                args.outbound_verdict.as_deref(),
+                &text,
+            )
+            .map_err(|error| Json(ToolOutcome::failure(error)))?;
         }
         let action = MutationAction::EditScheduledMessage {
             chat_id: canonical_chat_id,
@@ -8340,6 +8367,16 @@ impl McpServer {
         }
         let poll =
             validate_poll_create_args(&args).map_err(|error| Json(ToolOutcome::failure(error)))?;
+        let poll_text = poll_gate_text(&poll);
+        enforce_text_gate(
+            &self.settings,
+            self.owner_grant_file(),
+            "prepare_create_poll",
+            args.chat_id.0.as_str(),
+            args.outbound_verdict.as_deref(),
+            &poll_text,
+        )
+        .map_err(|error| Json(ToolOutcome::failure(error)))?;
         let (account, selected_session) = self
             .backend
             .get_me(None)
@@ -14010,6 +14047,15 @@ impl McpServer {
             .map_err(|error| Json(ToolOutcome::failure(error)))?;
         validate_mutation_text(&requested.text, "prepare_edit_message.text")
             .map_err(|error| Json(ToolOutcome::failure(error)))?;
+        enforce_text_gate(
+            &self.settings,
+            self.owner_grant_file(),
+            "prepare_edit_message",
+            args.chat_id.0.as_str(),
+            args.outbound_verdict.as_deref(),
+            &args.text,
+        )
+        .map_err(|error| Json(ToolOutcome::failure(error)))?;
         let (account, selected_session) = self
             .backend
             .get_me(None)
@@ -37708,6 +37754,18 @@ fn enforce_media_gate(
         &bound,
     )?;
     Ok(())
+}
+
+/// Visible text of a poll as the outbound verdict binds it: the question, then every
+/// answer, then the optional solution — one per line (whitespace runs collapse anyway).
+fn poll_gate_text(poll: &PollCreateSpec) -> String {
+    let mut parts = Vec::with_capacity(poll.answers.len() + 2);
+    parts.push(poll.question.clone());
+    parts.extend(poll.answers.iter().cloned());
+    if let Some(solution) = &poll.solution {
+        parts.push(solution.clone());
+    }
+    parts.join("\n")
 }
 
 /// Run the client-text gate: a registered client target needs an
