@@ -1620,6 +1620,7 @@ pub trait TelegramBackend: Send + Sync + 'static {
         chat_id: &str,
         message_id: i32,
         text: &str,
+        parse_mode: CaptionParseMode,
     ) -> Result<i32, TelegramError>;
 
     async fn delete_messages(

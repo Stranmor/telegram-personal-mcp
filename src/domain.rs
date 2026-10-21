@@ -3091,6 +3091,8 @@ pub enum MutationAction {
         chat_id: String,
         before: MutationMessageSnapshot,
         text: String,
+        #[serde(default)]
+        parse_mode: CaptionParseMode,
     },
     DeleteMessages {
         chat_id: String,

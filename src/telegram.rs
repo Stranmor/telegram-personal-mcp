@@ -1721,11 +1721,13 @@ impl TelegramClient {
             .get_messages(peer.as_str(), &[message_id])
             .await
             .map_err(|error| TelegramError::Telegram(error.to_string()))?;
-        messages
+        let message = messages
             .iter()
             .find(|message| is_concrete_message(message))
-            .map(|message| message.html_text().unwrap_or_default())
-            .ok_or_else(|| TelegramError::MessageNotFound(format!("{chat_id}:{message_id}")))
+            .ok_or_else(|| TelegramError::MessageNotFound(format!("{chat_id}:{message_id}")))?;
+        let text = message.text().unwrap_or_default();
+        let entities = message.entities().map_or(&[][..], Vec::as_slice);
+        Ok(html_with_phone_links(text, entities))
     }
 
     pub async fn get_message_buttons(
@@ -8200,12 +8202,13 @@ impl TelegramClient {
         chat_id: &str,
         message_id: i32,
         text: &str,
+        parse_mode: CaptionParseMode,
     ) -> Result<i32, TelegramError> {
         let connected = self.connected(session_path).await?;
         let peer = Self::resolve_peer_ref(&connected.client, chat_id).await?;
         connected
             .client
-            .edit_message(peer.as_str(), message_id, text)
+            .edit_message(peer.as_str(), message_id, edit_text_input(text, parse_mode)?)
             .await
             .map_err(send_invocation_error)?;
         Ok(message_id)
@@ -11915,8 +11918,10 @@ impl TelegramBackend for TelegramClient {
         chat_id: &str,
         message_id: i32,
         text: &str,
+        parse_mode: CaptionParseMode,
     ) -> Result<i32, TelegramError> {
-        TelegramClient::edit_message(self, session_path, chat_id, message_id, text).await
+        TelegramClient::edit_message(self, session_path, chat_id, message_id, text, parse_mode)
+            .await
     }
 
     async fn delete_messages(
@@ -17192,14 +17197,112 @@ fn input_reply_to(
 fn caption_input(caption: &str, parse_mode: CaptionParseMode) -> InputMessage {
     match parse_mode {
         CaptionParseMode::Plain => InputMessage::text(caption),
-        CaptionParseMode::Markdown => InputMessage::markdown(caption),
-        CaptionParseMode::Html => InputMessage::html(caption),
+        CaptionParseMode::Markdown => tel_anchors_as_phone_entities(InputMessage::markdown(caption)),
+        CaptionParseMode::Html => tel_anchors_as_phone_entities(InputMessage::html(caption)),
         CaptionParseMode::RichMarkdown => {
             let normalized_caption = normalize_rich_markdown(caption);
             InputMessage::text("")
                 .rich_text(ferogram::parsers::parse_rich_markdown(&normalized_caption))
         },
     }
+}
+
+/// Edited messages carry the same entity payload as send paths; rich text is
+/// rejected because `messages.editMessage` has no rich-message field here.
+fn edit_text_input(text: &str, parse_mode: CaptionParseMode) -> Result<InputMessage, TelegramError> {
+    match parse_mode {
+        CaptionParseMode::Plain => Ok(InputMessage::text(text)),
+        CaptionParseMode::Markdown => {
+            Ok(tel_anchors_as_phone_entities(InputMessage::markdown(text)))
+        },
+        CaptionParseMode::Html => Ok(tel_anchors_as_phone_entities(InputMessage::html(text))),
+        CaptionParseMode::RichMarkdown => Err(TelegramError::Telegram(
+            "rich_markdown parse mode is not supported for message edits".to_string(),
+        )),
+    }
+}
+
+/// Telegram silently drops a `text_url` entity whose URL is a `tel:` link, but
+/// a phone number is clickable through `messageEntityPhone`. Convert the HTML
+/// `<a href="tel:…">` anchor (and its Markdown twin) at the boundary so the
+/// visible text stays untouched and the entity survives on the server.
+fn tel_anchors_as_phone_entities(message: InputMessage) -> InputMessage {
+    let Some(entities) = message.entities else {
+        return message;
+    };
+    let entities = entities
+        .into_iter()
+        .map(|entity| match entity {
+            tl::enums::MessageEntity::TextUrl(url) if canonical_tel_url(&url.url).is_some() => {
+                tl::enums::MessageEntity::Phone(tl::types::MessageEntityPhone {
+                    offset: url.offset,
+                    length: url.length,
+                })
+            },
+            other => other,
+        })
+        .collect();
+    InputMessage { entities: Some(entities), ..message }
+}
+
+/// Canonical `tel:+7…` form of a `tel:` URL, or `None` for any other URL.
+pub(crate) fn canonical_tel_url(url: &str) -> Option<String> {
+    if !url.get(..4).is_some_and(|prefix| prefix.eq_ignore_ascii_case("tel:")) {
+        return None;
+    }
+    Some(format!("tel:{}", canonical_phone_number(&url[4..])))
+}
+
+fn canonical_phone_number(raw: &str) -> String {
+    let digits: String = raw.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() == 11 && digits.starts_with('8') {
+        format!("+7{}", &digits[1..])
+    } else if digits.len() == 11 && digits.starts_with('7') {
+        format!("+{digits}")
+    } else if let Some(rest) = digits.strip_prefix("00") {
+        format!("+{rest}")
+    } else {
+        format!("+{digits}")
+    }
+}
+
+/// Renders a message exactly like Telegram HTML, with phone entities exposed as
+/// `tel:` anchors so readback and delete-recovery snapshots keep the link.
+fn html_with_phone_links(text: &str, entities: &[tl::enums::MessageEntity]) -> String {
+    let mapped: Vec<tl::enums::MessageEntity> = entities
+        .iter()
+        .map(|entity| match entity {
+            tl::enums::MessageEntity::Phone(phone) => {
+                let visible = utf16_slice(text, phone.offset, phone.length).unwrap_or_default();
+                tl::enums::MessageEntity::TextUrl(tl::types::MessageEntityTextUrl {
+                    offset: phone.offset,
+                    length: phone.length,
+                    url: format!("tel:{}", canonical_phone_number(visible)),
+                })
+            },
+            other => other.clone(),
+        })
+        .collect();
+    ferogram::parsers::generate_html(text, &mapped)
+}
+
+/// UTF-16 slice of `text`, the coordinate system Telegram entities use.
+fn utf16_slice(text: &str, offset: i32, length: i32) -> Option<&str> {
+    let offset = usize::try_from(offset).ok()?;
+    let length = usize::try_from(length).ok()?;
+    let end = offset.checked_add(length)?;
+    let mut utf16 = 0usize;
+    let mut start = None;
+    for (index, character) in text.char_indices() {
+        if start.is_none() && utf16 == offset {
+            start = Some(index);
+        }
+        if utf16 >= end {
+            return start.map(|start| &text[start..index]);
+        }
+        utf16 = utf16.checked_add(character.len_utf16())?;
+    }
+    if utf16 == end { start.map(|start| &text[start..]) } else { None }
 }
 
 pub(crate) fn normalize_rich_markdown(markdown: &str) -> String {
@@ -18551,6 +18654,47 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn edit_text_input_turns_tel_anchors_into_phone_entities() {
+        let html = "<b>Запись</b> по телефону: \
+                    <a href=\"tel:+79193773549\">8 919 377-35-49</a>";
+        let message = edit_text_input(html, CaptionParseMode::Html).expect("html edit input");
+        assert_eq!(message.text, "Запись по телефону: 8 919 377-35-49");
+        let phone_at = message.text[..message.text.find("8 919 377-35-49").expect("phone")]
+            .encode_utf16()
+            .count() as i32;
+        let entities = message.entities.expect("entities");
+        assert!(
+            entities.iter().any(|entity| matches!(entity, tl::enums::MessageEntity::Bold(_)))
+        );
+        assert!(entities.iter().any(|entity| matches!(
+            entity,
+            tl::enums::MessageEntity::Phone(phone)
+                if phone.offset == phone_at && phone.length == 15
+        )));
+        assert!(!entities.iter().any(|entity| matches!(
+            entity,
+            tl::enums::MessageEntity::TextUrl(url) if url.url.starts_with("tel:")
+        )));
+    }
+
+    #[test]
+    fn phone_entities_render_as_canonical_tel_anchors() {
+        let text = "Звоните: 8 919 377-35-49";
+        let offset = text[..text.find("8 919").expect("phone")].encode_utf16().count() as i32;
+        let entities = vec![tl::enums::MessageEntity::Phone(tl::types::MessageEntityPhone {
+            offset,
+            length: 15,
+        })];
+        let html = html_with_phone_links(text, &entities);
+        assert!(
+            html.contains("<a href=\"tel:+79193773549\">8 919 377-35-49</a>"),
+            "{html}"
+        );
+        assert_eq!(canonical_tel_url("tel:8 (919) 377-35-49").as_deref(), Some("tel:+79193773549"));
+        assert_eq!(canonical_tel_url("https://example.com"), None);
+    }
 
     #[test]
     fn rich_markdown_hash_tags_are_not_promoted_to_headings() {
