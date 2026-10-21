@@ -536,6 +536,27 @@ fn validate_verdict(verdict: Option<&Path>, text: &str) -> Result<Value, ToolFai
             _ => return Err(verdict_error("unsigned", path, &format!("{field} is empty"))),
         };
     }
+    // Вердикт без независимого прохода не существует: маршруты bypass/skipped/deferred/
+    // unavailable означают, что судья не звался (kill-switch, кэш-обход, отложен) — такой
+    // файл не выпускает текст клиенту. Поле independent пишет orch, проверяем оба признака:
+    // явный флаг и сам маршрут (старый файл без флага тоже не пройдёт).
+    if object.get("independent") != Some(&Value::Bool(true)) {
+        return Err(verdict_error(
+            "not_independent",
+            path,
+            "independent must be true: the verdict has to come from a real review pass",
+        ));
+    }
+    if let Some(route) = string_field(object, "route") {
+        const INDEPENDENT_ROUTES: [&str; 4] = ["deterministic", "model", "cache", "free-fallback"];
+        if !INDEPENDENT_ROUTES.contains(&route) {
+            return Err(verdict_error(
+                "not_independent",
+                path,
+                &format!("route {route} is not an independent pass"),
+            ));
+        }
+    }
     let expected = text_sha256(text);
     match string_field(object, "text_sha256") {
         Some(actual) if actual.eq_ignore_ascii_case(&expected) => {},
@@ -878,7 +899,8 @@ mod tests {
                 "text_sha256": text_sha256(text),
                 "at_unix": now_unix(),
                 "model": "deepseek",
-                "route": "manager",
+                "route": "model",
+                "independent": true,
             })
             .to_string(),
         )
@@ -888,6 +910,26 @@ mod tests {
                 .expect("accepted"),
             TargetClass::Client
         );
+        // Вердикт без независимого прохода (kill-switch/отложение) не выпускает текст.
+        let bypass_path = temp.path().join("bypass.json");
+        fs::write(
+            &bypass_path,
+            json!({
+                "schema": VERDICT_SCHEMA,
+                "ok": true,
+                "addressee": "client",
+                "text_sha256": text_sha256(text),
+                "at_unix": now_unix(),
+                "model": "deepseek",
+                "route": "bypass",
+                "independent": false,
+            })
+            .to_string(),
+        )
+        .expect("bypass verdict");
+        let error = enforce_text(&state, None, "prepare_schedule_message", "@client", Some(&bypass_path), text)
+            .expect_err("bypass refused");
+        assert_eq!(error.code, "OUTBOUND_VERDICT_NOT_INDEPENDENT");
         let error = enforce_text(
             &state,
             None,
