@@ -75,6 +75,7 @@ use crate::message_cache::{
     MessageWindow, RegexSearchRequest, TimelineGranularity,
 };
 use crate::mutation_ledger::MutationLedger;
+use crate::media_gate;
 use crate::protocol::{ToolFailure, ToolOutcome};
 use crate::telegram::{DialogSummary, MessageSummary, TelegramError};
 use base64::{
@@ -1677,6 +1678,11 @@ struct SendStoryArgs {
     #[serde(default)]
     #[schemars(description = "Optional lifetime: 21600, 43200, 86400, or 172800 seconds.")]
     period_seconds: Option<i32>,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the independent-review-receipt/v1 JSON issued by a reviewer who is not the author. Mandatory when the target is a registered client: stories carry the same media contract as files."
+    )]
+    review_receipt: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1704,6 +1710,16 @@ struct EditStoryArgs {
     selected_user_refs: Vec<UserRef>,
     #[serde(default)]
     disallowed_user_refs: Vec<UserRef>,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the independent-review-receipt/v1 JSON for a replacement artifact. Mandatory with file_path when the target is a registered client."
+    )]
+    review_receipt: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the orch-outbound-verdict/v1 JSON for a caption-only edit. Mandatory when the target is a registered client and no file is replaced."
+    )]
+    outbound_verdict: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2616,6 +2632,11 @@ struct SendStickerArgs {
     silent: bool,
     #[serde(default)]
     noforwards: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the independent-review-receipt/v1 JSON issued by a reviewer who is not the author. Mandatory when the target is a registered client; the reviewer signs the chosen sticker."
+    )]
+    review_receipt: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2839,6 +2860,11 @@ struct AttachmentArgs {
 struct SendMessageArgs {
     chat_id: ChatId,
     text: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the orch-outbound-verdict/v1 JSON written by `orch outbound check --client --verdict-out`. Mandatory when the target is a registered client: the verdict must be bound to this exact text by SHA-256."
+    )]
+    outbound_verdict: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2854,6 +2880,11 @@ struct SendFileArgs {
     mode: FileSendMode,
     #[schemars(description = "SHA-256 of the exact local file bytes approved for this send.")]
     approved_sha256: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the independent-review-receipt/v1 JSON issued by a reviewer who is not the author. Mandatory when the target is a registered client: without it the send is refused before any network call."
+    )]
+    review_receipt: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2875,6 +2906,11 @@ struct SendVoiceArgs {
     noforwards: bool,
     #[schemars(description = "SHA-256 of the exact local audio bytes approved for this send.")]
     approved_sha256: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the independent-review-receipt/v1 JSON issued by a reviewer who is not the author. Mandatory when the target is a registered client: without it the send is refused before any network call."
+    )]
+    review_receipt: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2896,6 +2932,11 @@ struct SendVideoNoteArgs {
     noforwards: bool,
     #[schemars(description = "SHA-256 of the exact local MP4 bytes approved for this send.")]
     approved_sha256: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the independent-review-receipt/v1 JSON issued by a reviewer who is not the author. Mandatory when the target is a registered client: without it the send is refused before any network call."
+    )]
+    review_receipt: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2927,6 +2968,11 @@ struct SendAlbumArgs {
     silent: bool,
     #[serde(default)]
     noforwards: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the independent-review-receipt/v1 JSON issued by a reviewer who is not the author. It must bind every album item by sha256 and bytes. Mandatory when the target is a registered client."
+    )]
+    review_receipt: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2940,6 +2986,11 @@ struct PrepareMessageArgs {
     source: PrepareOutboundSourceArgs,
     #[serde(default)]
     reply_to_message_id: Option<i32>,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the orch-outbound-verdict/v1 JSON written by `orch outbound check --client --verdict-out`. Mandatory when the target is a registered client: the verdict must be bound to this exact text by SHA-256."
+    )]
+    outbound_verdict: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2956,6 +3007,11 @@ struct PrepareRichMessageArgs {
     source: PrepareOutboundSourceArgs,
     #[serde(default)]
     reply_to_message_id: Option<i32>,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the orch-outbound-verdict/v1 JSON written by `orch outbound check --client --verdict-out`. Mandatory when the target is a registered client: the verdict must be bound to the markdown source by SHA-256."
+    )]
+    outbound_verdict: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -3094,6 +3150,11 @@ struct PrepareScheduleMessageArgs {
     silent: bool,
     #[serde(default)]
     noforwards: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the orch-outbound-verdict/v1 JSON written by `orch outbound check --client --verdict-out`. Mandatory when the target is a registered client: the verdict must be bound to this exact text by SHA-256."
+    )]
+    outbound_verdict: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -3128,6 +3189,11 @@ struct PrepareScheduleFileMessageArgs {
     client_mutation_id: Option<String>,
     #[schemars(description = "SHA-256 of the exact local file bytes inspected for approval.")]
     approved_sha256: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the independent-review-receipt/v1 JSON issued by a reviewer who is not the author. Mandatory when the target is a registered client: without it the scheduled send is refused before any network call."
+    )]
+    review_receipt: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -3390,6 +3456,11 @@ struct PrepareFileMessageArgs {
     mode: FileSendMode,
     #[schemars(description = "SHA-256 of the exact local file bytes inspected for approval.")]
     approved_sha256: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the independent-review-receipt/v1 JSON issued by a reviewer who is not the author. Mandatory when the target is a registered client: without it the send is refused before any network call."
+    )]
+    review_receipt: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -3403,6 +3474,11 @@ struct SendGifArgs {
     reply_to_message_id: Option<i32>,
     #[schemars(description = "SHA-256 of the exact GIF bytes inspected for approval.")]
     approved_sha256: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Path to the independent-review-receipt/v1 JSON issued by a reviewer who is not the author. Mandatory when the target is a registered client: without it the send is refused before any network call."
+    )]
+    review_receipt: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -7950,6 +8026,15 @@ impl McpServer {
                 "prepare_schedule_message.reply_to_message_id must be positive",
             ))));
         }
+        enforce_text_gate(
+            &self.settings,
+            self.owner_grant_file(),
+            "prepare_schedule_message",
+            args.chat_id.0.as_str(),
+            args.outbound_verdict.as_deref(),
+            &args.text,
+        )
+        .map_err(|error| Json(ToolOutcome::failure(error)))?;
         let schedule_date_unix = resolve_schedule_date(
             args.schedule_at_unix,
             args.send_when_online,
@@ -11809,6 +11894,15 @@ impl McpServer {
                 "send_sticker.reply_to_message_id must be positive",
             ))));
         }
+        enforce_media_gate(
+            &self.settings,
+            self.owner_grant_file(),
+            "send_sticker",
+            args.chat_id.0.as_str(),
+            args.review_receipt.as_deref(),
+            &[],
+        )
+        .map_err(|error| Json(ToolOutcome::failure(error)))?;
         let (account, selected_session) = self
             .backend
             .get_me(None)
@@ -13065,6 +13159,15 @@ impl McpServer {
                 "prepare_message.reply_to_message_id must be positive",
             ))));
         }
+        enforce_text_gate(
+            &self.settings,
+            self.owner_grant_file(),
+            "prepare_message",
+            args.chat_id.0.as_str(),
+            args.outbound_verdict.as_deref(),
+            &args.text,
+        )
+        .map_err(|error| Json(ToolOutcome::failure(error)))?;
         let (account, selected_session) = self
             .backend
             .get_me(None)
@@ -13144,6 +13247,15 @@ impl McpServer {
         validate_optional_message_id(
             args.reply_to_message_id,
             "prepare_rich_message.reply_to_message_id",
+        )
+        .map_err(|error| Json(ToolOutcome::failure(error)))?;
+        enforce_text_gate(
+            &self.settings,
+            self.owner_grant_file(),
+            "prepare_rich_message",
+            args.chat_id.0.as_str(),
+            args.outbound_verdict.as_deref(),
+            &args.markdown,
         )
         .map_err(|error| Json(ToolOutcome::failure(error)))?;
         let (account, selected_session) = self
@@ -14967,6 +15079,7 @@ impl McpServer {
                 args.reply_to_message_id,
                 args.mode,
                 &args.approved_sha256,
+                args.review_receipt.as_deref(),
                 "prepare_file_message",
             )
             .await
@@ -14994,6 +15107,7 @@ impl McpServer {
                 args.reply_to_message_id,
                 FileSendMode::Gif,
                 &args.approved_sha256,
+                args.review_receipt.as_deref(),
                 "send_gif",
             )
             .await
@@ -15797,6 +15911,15 @@ impl McpServer {
                 "send_message.text must not be empty",
             ))));
         }
+        enforce_text_gate(
+            &self.settings,
+            self.owner_grant_file(),
+            "send_message",
+            args.chat_id.0.as_str(),
+            args.outbound_verdict.as_deref(),
+            &args.text,
+        )
+        .map_err(|error| Json(ToolOutcome::failure(error)))?;
         let (_, selected_session) = self
             .backend
             .get_me(None)
@@ -15841,6 +15964,15 @@ impl McpServer {
                 "send_file.approved_sha256 must be a 64-character hexadecimal SHA-256",
             ))));
         }
+        enforce_media_gate(
+            &self.settings,
+            self.owner_grant_file(),
+            "send_file",
+            args.chat_id.0.as_str(),
+            args.review_receipt.as_deref(),
+            &[(&args.file_path, &args.approved_sha256)],
+        )
+        .map_err(|error| Json(ToolOutcome::failure(error)))?;
         if args.reply_to_message_id.is_some_and(|message_id| message_id <= 0) {
             return Err(Json(ToolOutcome::failure(ToolFailure::invalid_argument(
                 "send_file.reply_to_message_id must be positive",
@@ -16448,6 +16580,7 @@ impl McpServer {
         reply_to_message_id: Option<i32>,
         mode: FileSendMode,
         approved_sha256: &str,
+        review_receipt: Option<&std::path::Path>,
         tool_name: &str,
     ) -> Result<PreparedMutation, ToolFailure> {
         validate_chat_id(chat_id, tool_name)?;
@@ -16461,6 +16594,14 @@ impl McpServer {
                 "{tool_name}.reply_to_message_id must be positive"
             )));
         }
+        enforce_media_gate(
+            &self.settings,
+            self.owner_grant_file(),
+            tool_name,
+            chat_id.0.as_str(),
+            review_receipt,
+            &[(file_path, approved_sha256)],
+        )?;
         let (account, selected_session) =
             self.backend.get_me(None).await.map_err(ToolFailure::from)?;
         let canonical_chat_id = self
@@ -16554,6 +16695,14 @@ impl McpServer {
                 "{TOOL_NAME}.reply_to_message_id must be positive"
             )));
         }
+        enforce_media_gate(
+            &self.settings,
+            self.owner_grant_file(),
+            TOOL_NAME,
+            args.chat_id.0.as_str(),
+            args.review_receipt.as_deref(),
+            &[(&args.file_path, &args.approved_sha256)],
+        )?;
         let schedule_date_unix =
             resolve_schedule_date(args.schedule_at_unix, args.send_when_online, None, TOOL_NAME)?;
         let (account, selected_session) =
@@ -16721,6 +16870,14 @@ impl McpServer {
         validate_caption(&args.caption, "send_voice.caption")?;
         validate_optional_message_id(args.reply_to_message_id, "send_voice.reply_to_message_id")?;
         validate_optional_message_id(args.topic_id, "send_voice.topic_id")?;
+        enforce_media_gate(
+            &self.settings,
+            self.owner_grant_file(),
+            TOOL_NAME,
+            args.chat_id.0.as_str(),
+            args.review_receipt.as_deref(),
+            &[(&args.file_path, &args.approved_sha256)],
+        )?;
         let (account, selected_session) =
             self.backend.get_me(None).await.map_err(ToolFailure::from)?;
         let canonical_chat_id = self
@@ -16785,6 +16942,14 @@ impl McpServer {
             "send_video_note.reply_to_message_id",
         )?;
         validate_optional_message_id(args.topic_id, "send_video_note.topic_id")?;
+        enforce_media_gate(
+            &self.settings,
+            self.owner_grant_file(),
+            TOOL_NAME,
+            args.chat_id.0.as_str(),
+            args.review_receipt.as_deref(),
+            &[(&args.file_path, &args.approved_sha256)],
+        )?;
         let (account, selected_session) =
             self.backend.get_me(None).await.map_err(ToolFailure::from)?;
         let canonical_chat_id = self
@@ -16877,6 +17042,19 @@ impl McpServer {
         for (index, caption) in captions.iter().enumerate() {
             validate_caption(caption, &format!("send_album.items[{index}].caption"))?;
         }
+        let album_artifacts = args
+            .items
+            .iter()
+            .map(|item| (item.file_path.as_path(), item.approved_sha256.as_str()))
+            .collect::<Vec<_>>();
+        enforce_media_gate(
+            &self.settings,
+            self.owner_grant_file(),
+            TOOL_NAME,
+            args.chat_id.0.as_str(),
+            args.review_receipt.as_deref(),
+            &album_artifacts,
+        )?;
         let (account, selected_session) =
             self.backend.get_me(None).await.map_err(ToolFailure::from)?;
         let canonical_chat_id = self
@@ -30215,6 +30393,14 @@ impl McpServer {
                 "send_story.period_seconds must be 21600, 43200, 86400, or 172800 when provided",
             ));
         }
+        enforce_media_gate(
+            &self.settings,
+            self.owner_grant_file(),
+            "send_story",
+            args.chat_id.0.as_str(),
+            args.review_receipt.as_deref(),
+            &[(&args.file_path, &args.approved_sha256)],
+        )?;
 
         let (account, selected_session) =
             self.backend.get_me(None).await.map_err(ToolFailure::from)?;
@@ -30325,6 +30511,30 @@ impl McpServer {
             return Err(ToolFailure::invalid_argument(
                 "edit_story privacy user references require privacy to be provided",
             ));
+        }
+        if let Some(file_path) = args.file_path.as_deref() {
+            let approved_sha256 = args.approved_sha256.as_deref().ok_or_else(|| {
+                ToolFailure::invalid_argument(
+                    "edit_story.file_path and approved_sha256 must be provided together",
+                )
+            })?;
+            enforce_media_gate(
+                &self.settings,
+                self.owner_grant_file(),
+                "edit_story",
+                args.chat_id.0.as_str(),
+                args.review_receipt.as_deref(),
+                &[(file_path, approved_sha256)],
+            )?;
+        } else if let Some(caption) = args.caption.as_deref() {
+            enforce_text_gate(
+                &self.settings,
+                self.owner_grant_file(),
+                "edit_story",
+                args.chat_id.0.as_str(),
+                args.outbound_verdict.as_deref(),
+                caption,
+            )?;
         }
 
         let (account, selected_session) =
@@ -37344,6 +37554,59 @@ fn mutation_file_artifact(snapshot: &FileSnapshot) -> MutationFileArtifact {
         size_bytes: snapshot.size_bytes,
         sha256: snapshot.sha256.clone(),
     }
+}
+
+impl McpServer {
+    fn owner_grant_file(&self) -> Option<&std::path::Path> {
+        self.approval.as_ref().and_then(|runtime| runtime.policy.owner_grant_file.as_deref())
+    }
+}
+
+/// Run the client-media gate before the first network call: classification uses
+/// the raw target, and each artifact is bound by `approved_sha256` plus local
+/// size (the exact bytes are re-hashed later by `capture_approved_upload`).
+fn enforce_media_gate(
+    settings: &McpServerSettings,
+    owner_grant_file: Option<&std::path::Path>,
+    tool: &str,
+    target: &str,
+    receipt: Option<&std::path::Path>,
+    artifacts: &[(&std::path::Path, &str)],
+) -> Result<(), ToolFailure> {
+    let mut bound = Vec::with_capacity(artifacts.len());
+    for (path, sha256) in artifacts {
+        bound.push(media_gate::artifact_from_path(path, sha256, tool)?);
+    }
+    media_gate::enforce_media(
+        &settings.state_db_path,
+        owner_grant_file,
+        tool,
+        target,
+        receipt,
+        &bound,
+    )?;
+    Ok(())
+}
+
+/// Run the client-text gate: a registered client target needs an
+/// `orch outbound check --client` verdict bound to exactly this text.
+fn enforce_text_gate(
+    settings: &McpServerSettings,
+    owner_grant_file: Option<&std::path::Path>,
+    tool: &str,
+    target: &str,
+    verdict: Option<&std::path::Path>,
+    text: &str,
+) -> Result<(), ToolFailure> {
+    media_gate::enforce_text(
+        &settings.state_db_path,
+        owner_grant_file,
+        tool,
+        target,
+        verdict,
+        text,
+    )?;
+    Ok(())
 }
 
 async fn prepare_captured_mutation(

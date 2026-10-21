@@ -9,6 +9,7 @@ mod invite;
 pub mod ledger;
 pub mod maintenance;
 pub mod mcp;
+pub mod media_gate;
 pub mod message_cache;
 pub mod mutation_ledger;
 mod profile_photo;
