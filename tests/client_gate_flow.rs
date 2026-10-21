@@ -357,7 +357,12 @@ async fn client_media_with_bound_receipt_is_prepared() -> anyhow::Result<()> {
             .clone(),
         ))
         .await?;
-    assert_eq!(prepared.is_error, Some(false));
+    assert_eq!(
+        prepared.is_error,
+        Some(false),
+        "prepare_file_message rejected: {:?}",
+        prepared.structured_content
+    );
     assert_eq!(backend.mutation_call_counts().await, (0, 0));
 
     client.cancel().await?;
