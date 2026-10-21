@@ -295,7 +295,23 @@ async fn client_media_with_bound_receipt_is_prepared() -> anyhow::Result<()> {
     let bot = Arc::new(FakeApprovalBot::default());
     let temp = tempfile::tempdir()?;
     write_targets(temp.path(), &[FIXTURE_CLIENT_CHAT]);
-    let artifact = temp.path().join("frame.png");
+    // Файл обязан лежать в управляемом кеше вложений: берём каталог через download_attachment
+    // (тот же путь, что у живого потребителя), иначе отказ придёт не от гейта.
+    let downloaded = client
+        .call_tool(CallToolRequestParams::new("download_attachment").with_arguments(
+            json!({"chat_id": "@alex", "message_id": 11}).as_object().expect("object").clone(),
+        ))
+        .await?;
+    let downloaded_path = downloaded
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/local_path"))
+        .and_then(Value::as_str)
+        .expect("download path");
+    let artifact = Path::new(downloaded_path)
+        .parent()
+        .expect("download directory")
+        .join("approved-frame.png");
     let bytes = b"\x89PNG\r\n\x1a\napproved-frame";
     std::fs::write(&artifact, bytes)?;
     let sha256 = format!("{:x}", Sha256::digest(bytes));
