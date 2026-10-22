@@ -37,6 +37,10 @@ fn now_unix() -> i64 {
 }
 
 fn write_targets(dir: &Path, entries: &[&str]) {
+    write_targets_generated_at(dir, entries, json!(chrono::Utc::now().to_rfc3339()));
+}
+
+fn write_targets_generated_at(dir: &Path, entries: &[&str], generated_at: Value) {
     let targets: Vec<Value> = entries
         .iter()
         .map(|chat_id| json!({"chat_id": chat_id, "kind": "chat", "source": "test"}))
@@ -45,7 +49,7 @@ fn write_targets(dir: &Path, entries: &[&str]) {
         dir.join("client-targets.json"),
         json!({
             "schema": "telegram-client-targets/v1",
-            "generated_at": "2026-10-21T00:00:00Z",
+            "generated_at": generated_at,
             "targets": targets,
         })
         .to_string(),
@@ -469,6 +473,106 @@ async fn unreadable_targets_registry_fails_closed() -> anyhow::Result<()> {
     assert_eq!(refused.is_error, Some(true));
     assert_eq!(error_code(&refused), Some("CLIENT_TARGETS_REGISTRY_UNREADABLE"));
     assert_eq!(backend.mutation_call_counts().await, (0, 0));
+
+    client.cancel().await?;
+    server_task.await??;
+    Ok(())
+}
+
+/// Реестр клиентов — граница «клиент/чужой»: без файла или с устаревшим
+/// `generated_at` гейт обязан отказать типизированно, а не пропустить отправку
+/// как «чужому» (дыра v1, найденная ревью: удаление файла молча выключало гейт).
+#[tokio::test]
+async fn missing_or_stale_targets_registry_fails_closed() -> anyhow::Result<()> {
+    let backend = Arc::new(FakeTelegramBackend::fixture());
+    let bot = Arc::new(FakeApprovalBot::default());
+    let temp = tempfile::tempdir()?;
+    let server = McpServer::with_approval(
+        backend.clone(),
+        McpServerSettings {
+            attachment_cache_dir: temp.path().join("attachments"),
+            max_download_bytes: 1024 * 1024,
+            max_upload_bytes: 1024 * 1024,
+            state_db_path: temp.path().join("state.sqlite"),
+        },
+        ApprovalPolicy {
+            approval_chat_id: 700,
+            approval_user_id: 700,
+            ttl_seconds: 3_600,
+            poll_timeout_seconds: 1,
+            owner_grant_file: None,
+            owner_permission_file: None,
+        },
+        bot,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = ().serve(client_transport).await?;
+
+    let refused = client
+        .call_tool(CallToolRequestParams::new("prepare_message").with_arguments(
+            json!({
+                "chat_id": "-100999000",
+                "text": "Отправка при отсутствующем реестре клиентов",
+                "source": {"kind": "self_originated"}
+            })
+            .as_object()
+            .expect("object")
+            .clone(),
+        ))
+        .await?;
+    assert_eq!(refused.is_error, Some(true));
+    assert_eq!(error_code(&refused), Some("CLIENT_TARGETS_REGISTRY_MISSING"));
+
+    // Свой чат владельца — не «прочий адресат»: реестр ему не нужен.
+    let own = client
+        .call_tool(CallToolRequestParams::new("prepare_message").with_arguments(
+            json!({
+                "chat_id": "me",
+                "text": "Заметка себе при пустом реестре клиентов",
+                "source": {"kind": "self_originated"}
+            })
+            .as_object()
+            .expect("object")
+            .clone(),
+        ))
+        .await?;
+    assert_eq!(own.is_error, Some(false));
+
+    write_targets_generated_at(
+        temp.path(),
+        &[CLIENT_CHAT],
+        json!(now_unix() - telegram_personal_mcp::media_gate::DEFAULT_TARGETS_MAX_AGE_SECONDS - 60),
+    );
+    let stale = client
+        .call_tool(CallToolRequestParams::new("prepare_message").with_arguments(
+            json!({
+                "chat_id": CLIENT_CHAT,
+                "text": "Отправка при просроченном реестре клиентов",
+                "source": {"kind": "self_originated"}
+            })
+            .as_object()
+            .expect("object")
+            .clone(),
+        ))
+        .await?;
+    assert_eq!(stale.is_error, Some(true));
+    assert_eq!(error_code(&stale), Some("CLIENT_TARGETS_REGISTRY_STALE"));
+    assert_eq!(backend.mutation_call_counts().await, (0, 0));
+
+    let log = std::fs::read_to_string(temp.path().join("media-gate.jsonl"))?;
+    assert!(
+        log.contains("\"client_targets_registry_missing\"") && log.contains("\"decision\":\"denied\""),
+        "the gate log must record the missing registry as denied: {log}"
+    );
+    assert!(
+        log.contains("\"client_targets_registry_stale\""),
+        "the gate log must record the stale registry: {log}"
+    );
 
     client.cancel().await?;
     server_task.await??;

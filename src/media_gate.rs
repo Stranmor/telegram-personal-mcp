@@ -13,8 +13,10 @@
 //! * any other personal chat is delivered but leaves an
 //!   `unclassified_media_target` event, so a new client cannot enter outside
 //!   the gate unnoticed;
-//! * a registry that exists but cannot be read fails closed for every
-//!   non-owner target.
+//! * a registry that is missing, stale (its `generated_at` is older than the
+//!   freshness bound) or unreadable fails closed for every non-owner target:
+//!   without a current registry the gate cannot tell a client from a stranger,
+//!   and guessing "stranger" would silently switch the gate off.
 //!
 //! The gate runs before the first network call: classification uses the raw
 //! target string, artifact sizes come from local metadata, and the receipt hash
@@ -38,6 +40,12 @@ pub const DEFAULT_MAX_AGE_SECONDS: i64 = 86_400;
 pub const FUTURE_SKEW_SECONDS: i64 = 300;
 pub const MAX_AGE_ENV: &str = "MEDIA_REVIEW_RECEIPT_MAX_AGE_SECONDS";
 pub const CLIENT_TARGETS_ENV: &str = "TELEGRAM_MCP_CLIENT_TARGETS";
+/// Freshness bound of the exported client registry. The exporter
+/// (`orch-client-targets.timer`) rewrites the file every 30 minutes, so 24 hours
+/// is 48 consecutive missed ticks: an exporter that silently stopped cannot keep
+/// the gate's "who is a client" knowledge current for longer than a day.
+pub const DEFAULT_TARGETS_MAX_AGE_SECONDS: i64 = 86_400;
+pub const TARGETS_MAX_AGE_ENV: &str = "TELEGRAM_MCP_CLIENT_TARGETS_MAX_AGE_SECONDS";
 pub const GATE_LOG_FILE: &str = "media-gate.jsonl";
 
 const MAX_GATE_FILE_BYTES: u64 = 1 << 20;
@@ -219,8 +227,9 @@ fn classify(
     if is_owner_target(target, owner_id) {
         return Ok(TargetClass::Owner);
     }
+    let path = client_targets_path(state_db_path);
     match load_client_targets(state_db_path) {
-        Ok(Some(targets)) => {
+        Ok(targets) => {
             if targets.contains(target) {
                 Ok(TargetClass::Client)
             } else {
@@ -237,19 +246,57 @@ fn classify(
                 Ok(TargetClass::Unclassified)
             }
         },
-        Ok(None) => {
+        Err(RegistryError::Missing) => {
             record_gate_event(
                 state_db_path,
                 "client_targets_registry_missing",
                 &[
                     ("tool", Value::String(tool.to_string())),
                     ("target", Value::String(target.to_string())),
-                    ("decision", Value::String("allowed".to_string())),
+                    ("decision", Value::String("denied".to_string())),
+                    ("reason_code", Value::String("CLIENT_TARGETS_REGISTRY_MISSING".to_string())),
                 ],
             );
-            Ok(TargetClass::Unclassified)
+            Err(ToolFailure::new(
+                "CLIENT_TARGETS_REGISTRY_MISSING",
+                format!(
+                    "the client-targets registry {} is missing, so a non-owner send cannot be \
+                     classified as client or stranger; every non-owner send is refused until the \
+                     registry exists again (run `orch outbound client-targets export`; the \
+                     orch-client-targets.timer rewrites it every 30 minutes)",
+                    path.display()
+                ),
+                false,
+            ))
         },
-        Err(error) => {
+        Err(RegistryError::Stale { generated_at, age_seconds, max_age_seconds }) => {
+            record_gate_event(
+                state_db_path,
+                "client_targets_registry_stale",
+                &[
+                    ("tool", Value::String(tool.to_string())),
+                    ("target", Value::String(target.to_string())),
+                    ("decision", Value::String("denied".to_string())),
+                    ("reason_code", Value::String("CLIENT_TARGETS_REGISTRY_STALE".to_string())),
+                    ("generated_at", Value::String(generated_at.clone())),
+                    ("age_seconds", Value::from(age_seconds)),
+                    ("max_age_seconds", Value::from(max_age_seconds)),
+                ],
+            );
+            Err(ToolFailure::new(
+                "CLIENT_TARGETS_REGISTRY_STALE",
+                format!(
+                    "the client-targets registry {} was generated at {generated_at}, \
+                     {age_seconds} seconds ago (limit {max_age_seconds} seconds, {}); every \
+                     non-owner send is refused until the registry is refreshed (run \
+                     `orch outbound client-targets export`)",
+                    path.display(),
+                    TARGETS_MAX_AGE_ENV
+                ),
+                false,
+            ))
+        },
+        Err(RegistryError::Invalid(reason)) => {
             record_gate_event(
                 state_db_path,
                 "client_targets_registry_unreadable",
@@ -257,15 +304,15 @@ fn classify(
                     ("tool", Value::String(tool.to_string())),
                     ("target", Value::String(target.to_string())),
                     ("decision", Value::String("denied".to_string())),
-                    ("reason", Value::String(error.to_string())),
+                    ("reason", Value::String(reason.clone())),
                 ],
             );
             Err(ToolFailure::new(
                 "CLIENT_TARGETS_REGISTRY_UNREADABLE",
                 format!(
-                    "the client-targets registry {} exists but cannot be read: {error}; \
+                    "the client-targets registry {} exists but cannot be read: {reason}; \
                      every non-owner send is refused until the registry is valid again",
-                    client_targets_path(state_db_path).display()
+                    path.display()
                 ),
                 false,
             ))
@@ -325,39 +372,78 @@ impl ClientTargets {
     }
 }
 
-/// `Ok(None)` means the exporter has never written a registry yet; a present
-/// but unreadable/invalid file is an error and fails closed.
-fn load_client_targets(state_db_path: &Path) -> Result<Option<ClientTargets>, String> {
+/// Why the exported registry cannot be trusted. Every variant is a typed
+/// refusal: the gate never falls back to "allow" when its knowledge about
+/// clients is missing, stale or invalid.
+#[derive(Debug)]
+enum RegistryError {
+    /// The exporter has not written a registry, or the file was removed/renamed.
+    Missing,
+    /// The file exists but is not a valid `telegram-client-targets/v1` document.
+    Invalid(String),
+    /// The document parses, but `generated_at` is older than the freshness bound.
+    Stale { generated_at: String, age_seconds: i64, max_age_seconds: i64 },
+}
+
+fn load_client_targets(state_db_path: &Path) -> Result<ClientTargets, RegistryError> {
     let path = client_targets_path(state_db_path);
     let metadata = match fs::metadata(&path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("metadata failed: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(RegistryError::Missing),
+        Err(error) => return Err(RegistryError::Invalid(format!("metadata failed: {error}"))),
     };
     if !metadata.is_file() {
-        return Err("path is not a regular file".to_string());
+        return Err(RegistryError::Invalid("path is not a regular file".to_string()));
     }
     if metadata.len() > MAX_GATE_FILE_BYTES {
-        return Err(format!("file is {} bytes, limit is {MAX_GATE_FILE_BYTES}", metadata.len()));
+        return Err(RegistryError::Invalid(format!(
+            "file is {} bytes, limit is {MAX_GATE_FILE_BYTES}",
+            metadata.len()
+        )));
     }
-    let text = fs::read_to_string(&path).map_err(|error| format!("read failed: {error}"))?;
-    let value: Value = serde_json::from_str(&text).map_err(|error| format!("not JSON: {error}"))?;
+    let text =
+        fs::read_to_string(&path).map_err(|error| RegistryError::Invalid(format!("read failed: {error}")))?;
+    let value: Value = serde_json::from_str(&text).map_err(|error| RegistryError::Invalid(format!("not JSON: {error}")))?;
     if value.get("schema").and_then(Value::as_str) != Some(TARGETS_SCHEMA) {
-        return Err(format!("schema must be {TARGETS_SCHEMA}"));
+        return Err(RegistryError::Invalid(format!("schema must be {TARGETS_SCHEMA}")));
+    }
+    // Свежесть — часть контракта реестра: устаревший файл означает, что экспортёр
+    // перестал тикать, и состав клиентов мог измениться. Молча разрешать по нему
+    // отправку — та же дыра, что и отсутствие файла.
+    let generated_at_value =
+        value.get("generated_at").ok_or_else(|| RegistryError::Invalid("generated_at is missing".to_string()))?;
+    let generated_at = parse_timestamp(generated_at_value)
+        .map_err(|error| RegistryError::Invalid(format!("generated_at: {error}")))?;
+    let now = now_unix();
+    if generated_at - now > FUTURE_SKEW_SECONDS {
+        return Err(RegistryError::Invalid(format!(
+            "generated_at {} is {} seconds in the future (clock skew)",
+            generated_at_value,
+            generated_at - now
+        )));
+    }
+    let max_age_seconds = client_targets_max_age_seconds();
+    let age_seconds = now - generated_at;
+    if age_seconds > max_age_seconds {
+        let generated_at = match generated_at_value {
+            Value::String(raw) => raw.clone(),
+            other => other.to_string(),
+        };
+        return Err(RegistryError::Stale { generated_at, age_seconds, max_age_seconds });
     }
     let entries = value
         .get("targets")
         .and_then(Value::as_array)
-        .ok_or_else(|| "targets must be an array".to_string())?;
+        .ok_or_else(|| RegistryError::Invalid("targets must be an array".to_string()))?;
     let mut targets = ClientTargets::default();
     for (index, entry) in entries.iter().enumerate() {
         let chat_id = entry
             .get("chat_id")
             .and_then(Value::as_str)
-            .ok_or_else(|| format!("targets[{index}].chat_id must be a string"))?
+            .ok_or_else(|| RegistryError::Invalid(format!("targets[{index}].chat_id must be a string")))?
             .trim();
         if chat_id.is_empty() {
-            return Err(format!("targets[{index}].chat_id is empty"));
+            return Err(RegistryError::Invalid(format!("targets[{index}].chat_id is empty")));
         }
         if let Ok(id) = chat_id.parse::<i64>() {
             if !targets.numeric.contains(&id) {
@@ -370,7 +456,7 @@ fn load_client_targets(state_db_path: &Path) -> Result<Option<ClientTargets>, St
             }
         }
     }
-    Ok(Some(targets))
+    Ok(targets)
 }
 
 fn validate_receipt(
@@ -697,6 +783,14 @@ fn max_age_seconds() -> i64 {
         .unwrap_or(DEFAULT_MAX_AGE_SECONDS)
 }
 
+fn client_targets_max_age_seconds() -> i64 {
+    std::env::var(TARGETS_MAX_AGE_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_TARGETS_MAX_AGE_SECONDS)
+}
+
 fn record_gate_event(state_db_path: &Path, event: &str, fields: &[(&str, Value)]) {
     let directory = state_dir(state_db_path);
     let path = directory.join(GATE_LOG_FILE);
@@ -735,11 +829,15 @@ mod tests {
     }
 
     fn write_targets(dir: &Path, entries: &[&str]) {
+        write_targets_generated_at(dir, entries, json!(Utc::now().to_rfc3339()));
+    }
+
+    fn write_targets_generated_at(dir: &Path, entries: &[&str], generated_at: Value) {
         let targets: Vec<Value> =
             entries.iter().map(|id| json!({"chat_id": id, "role": "client"})).collect();
         fs::write(
             dir.join("client-targets.json"),
-            json!({"schema": TARGETS_SCHEMA, "targets": targets}).to_string(),
+            json!({"schema": TARGETS_SCHEMA, "generated_at": generated_at, "targets": targets}).to_string(),
         )
         .expect("targets");
     }
@@ -869,16 +967,49 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_registry_fails_closed_and_missing_registry_is_unclassified() {
+    fn missing_registry_fails_closed() {
         let temp = temp_state();
         let state = state_path(temp.path());
-        assert_eq!(
-            enforce_media(&state, None, "send_file", "@someone", None, &[]).expect("missing registry"),
-            TargetClass::Unclassified
+        // Раньше отсутствие файла означало «чужой» и отправка разрешалась: удаление
+        // реестра молча выключало гейт. Теперь это типизированный отказ.
+        let error = enforce_media(&state, None, "send_file", "@someone", None, &[]).expect_err("missing registry");
+        assert_eq!(error.code, "CLIENT_TARGETS_REGISTRY_MISSING");
+        let error = enforce_text(&state, None, "prepare_message", "-100999000", None, "текст")
+            .expect_err("missing registry refuses text too");
+        assert_eq!(error.code, "CLIENT_TARGETS_REGISTRY_MISSING");
+    }
+
+    #[test]
+    fn stale_registry_fails_closed_and_fresh_registry_keeps_the_gate() {
+        let temp = temp_state();
+        let state = state_path(temp.path());
+        write_targets_generated_at(
+            temp.path(),
+            &["@client"],
+            json!(now_unix() - DEFAULT_TARGETS_MAX_AGE_SECONDS - 60),
         );
+        let error = enforce_media(&state, None, "send_file", "@client", None, &[]).expect_err("stale registry");
+        assert_eq!(error.code, "CLIENT_TARGETS_REGISTRY_STALE");
+        // Тот же состав, свежий generated_at: классификация снова работает — клиент
+        // требует квитанцию, а не получает пропуск.
+        write_targets(temp.path(), &["@client"]);
+        let error = enforce_media(&state, None, "send_file", "@client", None, &[]).expect_err("receipt required");
+        assert_eq!(error.code, "MEDIA_REVIEW_RECEIPT_MISSING");
+    }
+
+    #[test]
+    fn future_or_unreadable_registry_fails_closed() {
+        let temp = temp_state();
+        let state = state_path(temp.path());
+        write_targets_generated_at(
+            temp.path(),
+            &["@client"],
+            json!(now_unix() + FUTURE_SKEW_SECONDS + 60),
+        );
+        let error = enforce_media(&state, None, "send_file", "@someone", None, &[]).expect_err("future registry");
+        assert_eq!(error.code, "CLIENT_TARGETS_REGISTRY_UNREADABLE");
         fs::write(temp.path().join("client-targets.json"), "{not json").expect("broken");
-        let error = enforce_media(&state, None, "send_file", "@someone", None, &[])
-            .expect_err("fail closed");
+        let error = enforce_media(&state, None, "send_file", "@someone", None, &[]).expect_err("fail closed");
         assert_eq!(error.code, "CLIENT_TARGETS_REGISTRY_UNREADABLE");
     }
 
