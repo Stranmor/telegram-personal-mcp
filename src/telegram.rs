@@ -8936,7 +8936,16 @@ impl TelegramClient {
                             uploaded.mime_type()
                         )));
                     }
-                    uploaded.as_photo_media()
+                    let finalized = connected
+                        .client
+                        .invoke(&tl::functions::messages::UploadMedia {
+                            business_connection_id: None,
+                            peer: input_peer.clone(),
+                            media: uploaded.as_photo_media(),
+                        })
+                        .await
+                        .map_err(send_invocation_error)?;
+                    finalized_album_photo_media(finalized)?
                 },
                 crate::domain::AlbumMediaKind::Video => {
                     if !uploaded.mime_type().starts_with("video/") {
@@ -8945,7 +8954,16 @@ impl TelegramClient {
                             uploaded.mime_type()
                         )));
                     }
-                    uploaded.as_auto_media()
+                    let finalized = connected
+                        .client
+                        .invoke(&tl::functions::messages::UploadMedia {
+                            business_connection_id: None,
+                            peer: input_peer.clone(),
+                            media: uploaded.as_auto_media(),
+                        })
+                        .await
+                        .map_err(send_invocation_error)?;
+                    finalized_album_document_media(finalized)?
                 },
             };
             let caption = caption_input(&item.caption, caption_parse_mode);
@@ -17305,6 +17323,73 @@ fn utf16_slice(text: &str, offset: i32, length: i32) -> Option<&str> {
     if utf16 == end { start.map(|start| &text[start..]) } else { None }
 }
 
+/// Turns the result of `messages.uploadMedia` for an album photo into the file reference
+/// `messages.sendMultiMedia` accepts.
+///
+/// An album item must reference already-uploaded media (`inputMediaPhoto`): passing the
+/// freshly uploaded `InputMedia::UploadedPhoto` straight into `sendMultiMedia` makes Telegram
+/// answer 400 `MEDIA_INVALID` (live probe, task #5125). `messages.uploadMedia` is the step that
+/// finalizes the upload and returns the `MessageMedia` whose id/access_hash/file_reference are
+/// safe to reference.
+fn finalized_album_photo_media(
+    media: tl::enums::MessageMedia,
+) -> Result<tl::enums::InputMedia, TelegramError> {
+    let tl::enums::MessageMedia::Photo(photo_media) = media else {
+        return Err(TelegramError::SendRejected(
+            "Telegram returned non-photo media for an uploaded album photo".to_string(),
+        ));
+    };
+    let Some(tl::enums::Photo::Photo(photo)) = photo_media.photo else {
+        return Err(TelegramError::SendRejected(
+            "Telegram did not return an uploaded album photo".to_string(),
+        ));
+    };
+    Ok(tl::enums::InputMedia::Photo(tl::types::InputMediaPhoto {
+        spoiler: false,
+        live_photo: false,
+        id: tl::enums::InputPhoto::InputPhoto(tl::types::InputPhoto {
+            id: photo.id,
+            access_hash: photo.access_hash,
+            file_reference: photo.file_reference,
+        }),
+        ttl_seconds: None,
+        video: None,
+    }))
+}
+
+/// Turns the result of `messages.uploadMedia` for an album video into the file reference
+/// `messages.sendMultiMedia` accepts.
+///
+/// Same reason as [`finalized_album_photo_media`]: a fresh `InputMedia::UploadedDocument` inside
+/// `sendMultiMedia` is rejected with 400 `MEDIA_INVALID`, so the upload is finalized first and the
+/// album item carries `inputMediaDocument`.
+fn finalized_album_document_media(
+    media: tl::enums::MessageMedia,
+) -> Result<tl::enums::InputMedia, TelegramError> {
+    let tl::enums::MessageMedia::Document(doc_media) = media else {
+        return Err(TelegramError::SendRejected(
+            "Telegram returned non-document media for an uploaded album video".to_string(),
+        ));
+    };
+    let Some(tl::enums::Document::Document(document)) = doc_media.document else {
+        return Err(TelegramError::SendRejected(
+            "Telegram did not return an uploaded album document".to_string(),
+        ));
+    };
+    Ok(tl::enums::InputMedia::Document(tl::types::InputMediaDocument {
+        spoiler: false,
+        id: tl::enums::InputDocument::InputDocument(tl::types::InputDocument {
+            id: document.id,
+            access_hash: document.access_hash,
+            file_reference: document.file_reference,
+        }),
+        video_cover: None,
+        video_timestamp: None,
+        ttl_seconds: None,
+        query: None,
+    }))
+}
+
 pub(crate) fn normalize_rich_markdown(markdown: &str) -> String {
     markdown
         .split_inclusive('\n')
@@ -20994,5 +21079,132 @@ mod tests {
         .await;
         let error = outcome.expect_err("other refusals stay errors").to_string();
         assert!(error.contains("MSG_ID_INVALID"), "{error}");
+    }
+
+    type AlbumMessageMedia = tl::enums::MessageMedia;
+
+    fn album_photo_media(id: i64, hash: i64, reference: Vec<u8>) -> AlbumMessageMedia {
+        AlbumMessageMedia::Photo(tl::types::MessageMediaPhoto {
+            spoiler: false,
+            live_photo: false,
+            photo: Some(tl::enums::Photo::Photo(tl::types::Photo {
+                has_stickers: false,
+                id,
+                access_hash: hash,
+                file_reference: reference,
+                date: 1_700_000_000,
+                sizes: Vec::new(),
+                video_sizes: None,
+                dc_id: 2,
+            })),
+            ttl_seconds: None,
+            video: None,
+        })
+    }
+
+    fn album_document_media(id: i64, hash: i64, reference: Vec<u8>) -> AlbumMessageMedia {
+        AlbumMessageMedia::Document(tl::types::MessageMediaDocument {
+            nopremium: false,
+            spoiler: false,
+            video: false,
+            round: false,
+            voice: false,
+            document: Some(tl::enums::Document::Document(tl::types::Document {
+                id,
+                access_hash: hash,
+                file_reference: reference,
+                date: 1_700_000_000,
+                mime_type: "video/mp4".to_string(),
+                size: 0,
+                thumbs: None,
+                video_thumbs: None,
+                dc_id: 2,
+                attributes: Vec::new(),
+            })),
+            alt_documents: None,
+            video_cover: None,
+            video_timestamp: None,
+            ttl_seconds: None,
+        })
+    }
+
+    fn album_media_rejected(outcome: Result<tl::enums::InputMedia, TelegramError>) -> bool {
+        matches!(outcome, Err(TelegramError::SendRejected(_)))
+    }
+
+    #[test]
+    fn album_photo_media_is_a_finalized_reference() {
+        let media = finalized_album_photo_media(album_photo_media(10, 20, vec![1, 2, 3]))
+            .expect("a messageMediaPhoto with a concrete photo must finalize");
+        assert!(
+            !matches!(&media, tl::enums::InputMedia::UploadedPhoto(_)),
+            "album items must not carry the raw upload"
+        );
+        let tl::enums::InputMedia::Photo(tl::types::InputMediaPhoto {
+            id: tl::enums::InputPhoto::InputPhoto(photo),
+            ..
+        }) = media
+        else {
+            panic!("a photo upload must finalize into an inputPhoto reference");
+        };
+        assert_eq!((photo.id, photo.access_hash), (10, 20));
+        assert_eq!(photo.file_reference, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn album_document_media_is_a_finalized_reference() {
+        let media = finalized_album_document_media(album_document_media(30, 40, vec![4, 5, 6]))
+            .expect("a messageMediaDocument with a concrete document must finalize");
+        assert!(
+            !matches!(&media, tl::enums::InputMedia::UploadedDocument(_)),
+            "album items must not carry the raw upload"
+        );
+        let tl::enums::InputMedia::Document(tl::types::InputMediaDocument {
+            id: tl::enums::InputDocument::InputDocument(document),
+            ..
+        }) = media
+        else {
+            panic!("a video upload must finalize into an inputDocument reference");
+        };
+        assert_eq!((document.id, document.access_hash), (30, 40));
+        assert_eq!(document.file_reference, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn album_media_rejects_missing_payloads() {
+        let photo_without_payload = AlbumMessageMedia::Photo(tl::types::MessageMediaPhoto {
+            spoiler: false,
+            live_photo: false,
+            photo: None,
+            ttl_seconds: None,
+            video: None,
+        });
+        let empty_photo = AlbumMessageMedia::Photo(tl::types::MessageMediaPhoto {
+            spoiler: false,
+            live_photo: false,
+            photo: Some(tl::enums::Photo::Empty(tl::types::PhotoEmpty { id: 11 })),
+            ttl_seconds: None,
+            video: None,
+        });
+        let document_without_payload =
+            AlbumMessageMedia::Document(tl::types::MessageMediaDocument {
+                nopremium: false,
+                spoiler: false,
+                video: false,
+                round: false,
+                voice: false,
+                document: None,
+                alt_documents: None,
+                video_cover: None,
+                video_timestamp: None,
+                ttl_seconds: None,
+            });
+        let photo_reference = album_photo_media(10, 20, vec![1, 2, 3]);
+        let document_reference = album_document_media(30, 40, vec![4, 5, 6]);
+        assert!(album_media_rejected(finalized_album_photo_media(photo_without_payload)));
+        assert!(album_media_rejected(finalized_album_photo_media(empty_photo)));
+        assert!(album_media_rejected(finalized_album_document_media(document_without_payload)));
+        assert!(album_media_rejected(finalized_album_document_media(photo_reference)));
+        assert!(album_media_rejected(finalized_album_photo_media(document_reference)));
     }
 }
