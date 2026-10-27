@@ -85,6 +85,19 @@ async fn official_mcp_transport_exposes_structured_tools_and_typed_errors() -> a
         assert_eq!(annotations.idempotent_hint, Some(true));
         assert!(tool.output_schema.is_some());
     }
+    // The transcription receipt names the engine that produced the text: the
+    // recogniser runs on this host, so the contract must publish the provider.
+    let transcription_tool =
+        tools.iter().find(|tool| tool.name == "get_transcription").expect("get_transcription tool");
+    assert_eq!(
+        transcription_tool.annotations.as_ref().and_then(|annotations| annotations.read_only_hint),
+        Some(true)
+    );
+    let transcription_schema = serde_json::to_string(
+        transcription_tool.output_schema.as_ref().expect("get_transcription output schema"),
+    )?;
+    assert!(transcription_schema.contains("\"provider\""), "{transcription_schema}");
+    assert!(transcription_schema.contains("local:gigaam-v3-rnnt"), "{transcription_schema}");
     assert!(tools.iter().any(|tool| tool.name == "get_updates_state"));
     assert!(tools.iter().any(|tool| tool.name == "get_updates"));
     assert!(tools.iter().any(|tool| tool.name == "get_chat_moderation_settings"));

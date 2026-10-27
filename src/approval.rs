@@ -3426,18 +3426,19 @@ fn render_mutation_card(card: &MutationApprovalCard) -> Result<String, ApprovalB
             )
         },
         MutationAction::TranscribeAudio { chat_id, before } => (
-            "РАСШИФРОВКА АУДИО TELEGRAM — ВОЗМОЖЕН РАСХОД КВОТЫ",
+            "РАСШИФРОВКА АУДИО — ЛОКАЛЬНЫЙ ASR",
             format!("Чат: {chat_id}\nСообщение: #{}", before.message_id),
             format!(
-                "Тип медиа: {}\nДата сообщения (Unix): {}\n\nПервичный запрос может использовать Premium или оставшийся бесплатный лимит. Последующие опросы разрешаются только для этой уже подтверждённой расшифровки.",
+                "Тип медиа: {}\nДата сообщения (Unix): {}\n\nМедиа скачивается во временный файл и распознаётся на этом хосте моделью GigaAM-v3: квота Premium и пробный лимит Telegram не расходуются, ожидания серверной расшифровки нет.",
                 before.media_type.as_deref().unwrap_or("неизвестен"),
                 before.date_unix,
             ),
             match &approval.result {
                 Some(crate::domain::MutationResult::AudioTranscribed { transcription }) => {
                     format!(
-                        "ID: {}; pending: {}; текст: {}",
+                        "ID: {}; провайдер: {}; pending: {}; текст: {}",
                         transcription.transcription_id,
+                        transcription.provider,
                         transcription.pending,
                         one_line_preview(&transcription.text, 240)
                     )

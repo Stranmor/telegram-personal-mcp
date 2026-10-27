@@ -31,6 +31,22 @@ and releases use [Semantic Versioning](https://semver.org/).
   never sends Telegram messages or creates approval cards.
 
 ### Changed
+- `transcribe_audio`, `get_transcription` and the transcription approval card
+  no longer use `messages.transcribeAudio`. A voice or video note is downloaded
+  to a private temporary file and recognised on this host by the GigaAM-v3
+  route through the Hermes CLI (`hermes nexus transcribe --input … --output …
+  --format json --backend auto`, binary from `HERMES_ASR_BIN`, then `hermes` in
+  `PATH`, then `~/.local/bin/hermes`, per-clip budget in
+  `HERMES_ASR_TIMEOUT_SECONDS`). No Telegram transcription quota, trial limit
+  or server-side pending state is involved: the receipt is always
+  `pending=false` with no trial counters, and its identity is the deterministic
+  `local:<16 hex digits of the media SHA-256>` fingerprint instead of a decimal
+  server id. The response schema gains a `provider` field
+  (`local:gigaam-v3-rnnt`); receipts journalled before the cutover decode as
+  `telegram:server`. A missing CLI, a non-zero exit, a timeout and an empty
+  result are the typed failures `ASR_BINARY_MISSING`, `ASR_FAILED`,
+  `ASR_TIMEOUT` and `EMPTY_TRANSCRIPT`, so an empty string is never returned as
+  a successful transcription.
 - Mutation approval cards now speak in human terms: the card shows the resolved
   chat name and @username (with an honest `название недоступно` fallback when
   Telegram does not answer the resolution), a required `Зачем: …` line taken
