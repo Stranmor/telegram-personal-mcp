@@ -909,12 +909,25 @@ pub struct MessageTranslationBatch {
 pub struct AudioTranscriptionSummary {
     pub chat_id: String,
     pub message_id: i32,
-    #[schemars(description = "Telegram's exact 64-bit transcription id encoded as decimal text.")]
+    #[schemars(
+        description = "Transcription identity. `local:<16 lowercase hex digits>` is the head of the downloaded media SHA-256, so recognising the same file again returns the same id; receipts journalled before the local ASR cutover carry Telegram's decimal 64-bit id instead."
+    )]
     pub transcription_id: String,
     pub text: String,
     pub pending: bool,
     pub trial_remains_num: Option<i32>,
     pub trial_remains_until_unix: Option<i32>,
+    #[schemars(
+        description = "Engine that produced `text`. `local:gigaam-v3-rnnt` is this host's GigaAM-v3 route; `telegram:server` marks receipts journalled before the local ASR cutover."
+    )]
+    #[serde(default = "telegram_transcription_provider")]
+    pub provider: String,
+}
+
+/// Provider of transcriptions that were produced by Telegram itself, before
+/// this server started recognising audio locally.
+fn telegram_transcription_provider() -> String {
+    "telegram:server".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

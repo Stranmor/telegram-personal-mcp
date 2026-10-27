@@ -137,6 +137,14 @@ pub enum TelegramError {
     AttachmentNotFound(String),
     #[error("Attachment exceeds the configured download limit of {max_bytes} bytes")]
     AttachmentTooLarge { max_bytes: u64 },
+    #[error("No local ASR binary is available: {0}")]
+    AsrBinaryMissing(String),
+    #[error("The local ASR failed: {0}")]
+    AsrFailed(String),
+    #[error("The local ASR did not finish within {seconds} seconds")]
+    AsrTimeout { seconds: u64 },
+    #[error("The local ASR produced no transcript: {0}")]
+    EmptyTranscript(String),
     #[error("Telegram rejected the login code as invalid or expired")]
     InvalidLoginCode,
     #[error("This phone number must be registered with an official Telegram client first")]
@@ -2034,43 +2042,40 @@ impl TelegramClient {
         })
     }
 
+    /// Transcribe one voice or video note on this host.
+    ///
+    /// The media is downloaded to a private temporary file and recognised by
+    /// the local GigaAM-v3 route; no `messages.transcribeAudio` request is made,
+    /// so no account quota, trial limit or server-side pending state is
+    /// involved. A missing or broken recogniser, a timeout and an empty result
+    /// are typed failures, never an empty transcript reported as success.
     pub async fn transcribe_audio(
         &self,
         session_path: Option<PathBuf>,
         chat_id: &str,
         message_id: i32,
     ) -> Result<AudioTranscriptionSummary, TelegramError> {
-        let connected = self.connected(session_path).await?;
-        let peer_ref = Self::resolve_peer_ref(&connected.client, chat_id).await?;
-        let peer = connected
-            .client
-            .resolve(peer_ref.as_str())
+        let canonical_chat_id = self.resolve_chat_id(session_path.clone(), chat_id).await?;
+        // Resolve the recogniser before spending a download on it.
+        let asr = crate::asr::LocalAsr::discover()?;
+        let workspace = crate::asr::MediaWorkspace::create()?;
+        let media_path = workspace.media_path();
+        let downloaded = self
+            .download_attachment_to(
+                session_path,
+                chat_id,
+                message_id,
+                &media_path,
+                crate::asr::MAX_MEDIA_BYTES,
+            )
+            .await?;
+        if downloaded == 0 {
+            return Err(TelegramError::EmptyTranscript(format!(
+                "{chat_id}:{message_id} downloaded an empty media file"
+            )));
+        }
+        crate::asr::transcribe_downloaded_media(&canonical_chat_id, message_id, &media_path, &asr)
             .await
-            .map_err(|error| TelegramError::Telegram(error.to_string()))?;
-        let canonical_chat_id = canonical_peer_ref(&peer);
-        let input_peer = connected
-            .client
-            .resolve_to_input_peer(&peer)
-            .await
-            .map_err(|error| TelegramError::Telegram(error.to_string()))?;
-        let transcription = connected
-            .client
-            .invoke(&tl::functions::messages::TranscribeAudio {
-                peer: input_peer,
-                msg_id: message_id,
-            })
-            .await
-            .map_err(send_invocation_error)?;
-        let tl::enums::messages::TranscribedAudio::TranscribedAudio(transcription) = transcription;
-        Ok(AudioTranscriptionSummary {
-            chat_id: canonical_chat_id,
-            message_id,
-            transcription_id: transcription.transcription_id.to_string(),
-            text: transcription.text,
-            pending: transcription.pending,
-            trial_remains_num: transcription.trial_remains_num,
-            trial_remains_until_unix: transcription.trial_remains_until_date,
-        })
     }
 
     pub async fn rate_transcription(

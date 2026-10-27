@@ -6914,13 +6914,15 @@ impl McpServer {
         Ok(Json(ToolOutcome::success(prepared)))
     }
 
-    /// Prepare the first server-side transcription request for one voice/video note.
+    /// Prepare the local recognition of one voice/video note. The media is
+    /// downloaded and transcribed on this host, so no Telegram transcription
+    /// quota, trial limit or server-side pending state is involved.
     #[tool(annotations(
-        title = "Transcribe Telegram audio",
+        title = "Transcribe audio locally",
         read_only_hint = false,
         destructive_hint = false,
         idempotent_hint = true,
-        open_world_hint = true
+        open_world_hint = false
     ))]
     async fn transcribe_audio(
         &self,
@@ -6933,9 +6935,11 @@ impl McpServer {
         Ok(Json(ToolOutcome::success(prepared)))
     }
 
-    /// Poll one transcription only after its initial quota-bearing request was approved and applied.
+    /// Read the transcription receipt of one approved voice/video note. The
+    /// local recogniser is deterministic, so the same media always returns the
+    /// same local transcription id.
     #[tool(annotations(
-        title = "Get Telegram transcription",
+        title = "Get local transcription",
         read_only_hint = true,
         destructive_hint = false,
         idempotent_hint = true,
@@ -15635,11 +15639,11 @@ impl McpServer {
                 MutationApprovalState::Pending | MutationApprovalState::DispatchingCard
             )
         {
-            // Standing operator authorization (2026-09-11): requesting a
-            // server-side voice/video-note transcription is a routine
-            // read-class operation. It never waits for a button tap: claim
-            // the pending approval and execute it immediately, returning the
-            // terminal receipt instead of an approval card.
+            // Standing operator authorization (2026-09-11): starting a
+            // voice/video-note recognition is a routine read-class operation.
+            // It never waits for a button tap: claim the pending approval and
+            // execute it immediately, returning the terminal receipt instead
+            // of an approval card.
             let claimed = self
                 .mutation_ledger
                 .mark_approval_applying(&request.public.approval_id, now_unix())
@@ -27348,7 +27352,7 @@ impl McpServer {
         {
             return Err(ToolFailure::new(
                 "NO_CHANGE",
-                "this message already has an approved transcription request; use get_transcription to poll it",
+                "this message already has an approved transcription receipt; use get_transcription to read it",
                 false,
             ));
         }
@@ -27367,7 +27371,7 @@ impl McpServer {
         if !transcription_media_eligible(message.media_type.as_deref()) {
             return Err(ToolFailure::new(
                 "MESSAGE_NOT_TRANSCRIBABLE",
-                "transcribe_audio requires a Telegram voice note or video note",
+                "transcribe_audio requires a voice note or a video note",
                 false,
             ));
         }
@@ -27416,7 +27420,7 @@ impl McpServer {
         if current.transcription_id != approved.transcription_id {
             return Err(ToolFailure::new(
                 "STATE_INTEGRITY_ERROR",
-                "Telegram returned a transcription id different from the approved initial request",
+                "the local ASR returned a transcription id different from the approved request",
                 false,
             ));
         }
@@ -36584,11 +36588,38 @@ fn ensure_transcription_identity(
     if transcription.chat_id != chat_id || transcription.message_id != message_id {
         return Err(ToolFailure::new(
             "STATE_INTEGRITY_ERROR",
-            "Telegram returned a transcription for a different chat/message",
+            "the transcription belongs to a different chat/message",
             false,
         ));
     }
-    parse_positive_i64(&transcription.transcription_id, "transcription.transcription_id")?;
+    validate_transcription_id(&transcription.transcription_id)?;
+    if transcription.provider.trim().is_empty() {
+        return Err(ToolFailure::new(
+            "STATE_INTEGRITY_ERROR",
+            "the transcription receipt names no provider",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+/// A transcription id is either a local media fingerprint or the decimal id of
+/// a receipt journalled before the local ASR cutover.
+fn validate_transcription_id(value: &str) -> Result<(), ToolFailure> {
+    if value.starts_with(crate::asr::LOCAL_ID_PREFIX) {
+        if crate::asr::is_local_transcription_id(value) {
+            return Ok(());
+        }
+        return Err(ToolFailure::new(
+            "STATE_INTEGRITY_ERROR",
+            format!("{value} is not `local:` followed by 16 lowercase hex digits"),
+            false,
+        ));
+    }
+    // A receipt that is neither local nor canonical decimal is corrupt state,
+    // not a caller mistake.
+    parse_positive_i64(value, "transcription.transcription_id")
+        .map_err(|error| ToolFailure::new("STATE_INTEGRITY_ERROR", error.message, false))?;
     Ok(())
 }
 
@@ -38685,6 +38716,52 @@ fn truncate_preview(text: &mut Option<String>, max_chars: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcription_identity_accepts_local_fingerprints() {
+        let local = AudioTranscriptionSummary {
+            chat_id: "user:101".to_string(),
+            message_id: 12,
+            transcription_id: "local:0123456789abcdef".to_string(),
+            text: "текст".to_string(),
+            pending: false,
+            trial_remains_num: None,
+            trial_remains_until_unix: None,
+            provider: "local:gigaam-v3-rnnt".to_string(),
+        };
+        ensure_transcription_identity(&local, "user:101", 12).expect("local identity");
+
+        // A pre-cutover receipt keeps its decimal Telegram id.
+        let mut legacy = local.clone();
+        legacy.transcription_id = "123456789".to_string();
+        legacy.provider = "telegram:server".to_string();
+        ensure_transcription_identity(&legacy, "user:101", 12).expect("legacy identity");
+
+        for broken in [
+            "local:0123456789ABCDEF",
+            "local:0123456789abcde",
+            "local:0123456789abcdef0",
+            "local:nothexnothexnot",
+            "0",
+            "",
+        ] {
+            let mut candidate = local.clone();
+            candidate.transcription_id = broken.to_string();
+            let failure = ensure_transcription_identity(&candidate, "user:101", 12)
+                .expect_err("rejected identity");
+            assert_eq!(failure.code, "STATE_INTEGRITY_ERROR", "{broken}");
+        }
+
+        let mut providerless = local.clone();
+        providerless.provider = "  ".to_string();
+        let failure = ensure_transcription_identity(&providerless, "user:101", 12)
+            .expect_err("provider is required");
+        assert_eq!(failure.code, "STATE_INTEGRITY_ERROR");
+
+        let failure = ensure_transcription_identity(&local, "user:101", 13)
+            .expect_err("message mismatch");
+        assert_eq!(failure.code, "STATE_INTEGRITY_ERROR");
+    }
 
     #[test]
     fn mutation_action_label_uses_the_serde_kind_not_the_first_key() {

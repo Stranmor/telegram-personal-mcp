@@ -6273,6 +6273,7 @@ impl TelegramBackend for FakeTelegramBackend {
                 pending: true,
                 trial_remains_num: Some(2),
                 trial_remains_until_unix: Some(1_800_000_000),
+                provider: "fixture:telegram-server".to_string(),
             };
             state.transcriptions.insert(key, transcription.clone());
             transcription
