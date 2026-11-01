@@ -2290,6 +2290,203 @@ async fn html_edit_creates_tel_entities_and_keeps_the_visible_text() -> anyhow::
 }
 
 #[tokio::test]
+async fn scheduled_file_acceptance_survives_a_lagging_provider_readback() -> anyhow::Result<()> {
+    let backend = Arc::new(FakeTelegramBackend::fixture());
+    let bot = Arc::new(FakeApprovalBot::default());
+    let temp = tempfile::tempdir()?;
+    let state_db_path = temp.path().join("state.sqlite");
+    let server = McpServer::with_approval(
+        backend.clone(),
+        McpServerSettings {
+            attachment_cache_dir: temp.path().join("attachments"),
+            max_download_bytes: 1024 * 1024,
+            max_upload_bytes: 1024 * 1024,
+            state_db_path: state_db_path.clone(),
+        },
+        ApprovalPolicy {
+            approval_chat_id: 700,
+            approval_user_id: 700,
+            ttl_seconds: 3_600,
+            poll_timeout_seconds: 1,
+            owner_grant_file: None,
+            owner_permission_file: None,
+        },
+        bot.clone(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let worker = server.start_approval_worker()?.expect("approval worker");
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move {
+        server.serve(server_transport).await?.waiting().await?;
+        anyhow::Ok(())
+    });
+    let client = ().serve(client_transport).await?;
+    let ledger = MutationLedger::new(state_db_path.clone());
+
+    let upload_dir = temp.path().join("attachments");
+    std::fs::create_dir_all(&upload_dir)?;
+    // An upload source must live inside the managed attachment cache, so the
+    // probe takes the directory the fixture download created, exactly like the
+    // approved-file flow above.
+    let downloaded = client
+        .call_tool(CallToolRequestParams::new("download_attachment").with_arguments(
+            json!({ "chat_id": "@alex", "message_id": 11 }).as_object().expect("object").clone(),
+        ))
+        .await?;
+    let downloaded_path = downloaded
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.pointer("/data/local_path"))
+        .and_then(|value| value.as_str())
+        .expect("download path");
+    let file_path = std::path::Path::new(downloaded_path)
+        .parent()
+        .expect("download directory")
+        .join("scheduled-acceptance.txt");
+    let file_bytes = b"exact bytes accepted before the scheduled list caught up\n";
+    std::fs::write(&file_path, file_bytes)?;
+    let file_sha256 = format!("{:x}", Sha256::digest(file_bytes));
+
+    // The outbound media gate refuses every non-owner target while the
+    // client-targets registry is missing. This probe schedules to a fixture
+    // peer that is not a client, so the fixture carries the empty export that
+    // `orch outbound client-targets export` would produce for it.
+    std::fs::write(
+        temp.path().join("client-targets.json"),
+        json!({
+            "schema": "telegram-client-targets/v1",
+            "generated_at": chrono::Utc::now().to_rfc3339(),
+            "targets": [],
+        })
+        .to_string(),
+    )?;
+
+    // `1` read hides the created schedule for the first read-back only (the
+    // in-turn retry must converge); `usize::MAX` never converges, so the
+    // provider's own message id must stand as the acceptance receipt instead of
+    // becoming an unknown outcome that burns automated retries.
+    for (lagged_reads, schedule_date_unix, caption) in [
+        (1_usize, 2_000_000_400_i32, "scheduled acceptance retried"),
+        (usize::MAX, 2_000_000_500_i32, "scheduled acceptance latent"),
+    ] {
+        backend.lag_scheduled_readback_for(lagged_reads).await;
+        let prepared = client
+            .call_tool(
+                CallToolRequestParams::new("prepare_schedule_file_message").with_arguments(
+                    json!({
+                        "chat_id": "@alex",
+                        "file_path": file_path,
+                        "caption": caption,
+                        "parse_mode": "plain",
+                        "source": { "kind": "self_originated" },
+                        "schedule_at_unix": schedule_date_unix,
+                        "mode": "document",
+                        "approved_sha256": file_sha256
+                    })
+                    .as_object()
+                    .expect("object")
+                    .clone(),
+                ),
+            )
+            .await?;
+        assert!(
+            !prepared.is_error.unwrap_or(true),
+            "prepare_schedule_file_message failed for {caption}: {:?}",
+            prepared.structured_content
+        );
+        let mutation_id = prepared
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/data/mutation_id"))
+            .and_then(|value| value.as_str())
+            .expect("mutation id");
+        let payload_sha256 = prepared
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/data/payload_sha256"))
+            .and_then(|value| value.as_str())
+            .expect("payload hash");
+        let artifact_id = prepared
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/data/action/artifact/artifact_id"))
+            .and_then(|value| value.as_str())
+            .expect("artifact id");
+        let artifact_directory = state_db_path.with_extension("outbox").join(artifact_id);
+        assert!(artifact_directory.is_dir());
+        let requested = client
+            .call_tool(
+                CallToolRequestParams::new("request_mutation_approval").with_arguments(
+                    json!({
+                        "purpose": "тест: приёмочная квитанция отложенного файла",
+                        "mutation_id": mutation_id,
+                        "approved_payload_sha256": payload_sha256
+                    })
+                    .as_object()
+                    .expect("object")
+                    .clone(),
+                ),
+            )
+            .await?;
+        assert_eq!(requested.is_error, Some(false));
+        let approval_id = requested
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/data/approval_id"))
+            .and_then(|value| value.as_str())
+            .expect("approval id")
+            .to_string();
+        let card_id = requested
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/data/approval_message_id"))
+            .and_then(|value| value.as_i64())
+            .expect("approval message id");
+        bot.push_mutation_decision(&approval_id, ApprovalAction::Approve, 700, 700, card_id)
+            .await;
+        // The never-converging case spends the dispatch's whole in-turn read-back
+        // budget (two 1 s sleeps) before it records the receipt.
+        wait_for_mutation_state_within(
+            &state_db_path,
+            &approval_id,
+            MutationApprovalState::Applied,
+            1_000,
+        )
+        .await?;
+        wait_for_path_missing(&artifact_directory).await?;
+
+        // The probe's own lag knob is cleared before the assertion read, so the
+        // fixture list shows what the provider really holds.
+        backend.lag_scheduled_readback_for(0).await;
+        let approval = ledger.get_approval(&approval_id)?.expect("approval");
+        assert_eq!(
+            approval.automated_retry_count, 0,
+            "an accepted schedule must not consume an automated retry for {caption}"
+        );
+        assert_eq!(approval.last_error_code, None, "no unknown outcome for {caption}");
+        let scheduled = backend.get_scheduled_messages(None, "@alex").await?;
+        let created = scheduled
+            .iter()
+            .find(|message| message.text.as_deref() == Some(caption))
+            .expect("scheduled file readback");
+        assert_eq!(
+            approval.result,
+            Some(MutationResult::FileScheduled {
+                message_id: created.message_id,
+                schedule_date_unix,
+                sha256: file_sha256.clone(),
+            })
+        );
+    }
+
+    client.cancel().await?;
+    server_task.await??;
+    worker.abort();
+    let _ = worker.await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn changed_message_snapshot_blocks_an_approved_edit() -> anyhow::Result<()> {
     let backend = Arc::new(FakeTelegramBackend::fixture());
     let bot = Arc::new(FakeApprovalBot::default());
@@ -2435,7 +2632,18 @@ async fn wait_for_mutation_state(
     approval_id: &str,
     wanted: MutationApprovalState,
 ) -> anyhow::Result<()> {
-    for _ in 0..200 {
+    wait_for_mutation_state_within(state_db_path, approval_id, wanted, 200).await
+}
+
+/// Same wait with an explicit attempt budget: a dispatch that spends its own
+/// in-turn read-back budget needs a window wider than two seconds.
+async fn wait_for_mutation_state_within(
+    state_db_path: &std::path::Path,
+    approval_id: &str,
+    wanted: MutationApprovalState,
+    attempts: u32,
+) -> anyhow::Result<()> {
+    for _ in 0..attempts {
         let state = MutationLedger::new(state_db_path.to_path_buf())
             .get_approval(approval_id)?
             .map(|approval| approval.state);
