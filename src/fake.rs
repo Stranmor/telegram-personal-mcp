@@ -271,6 +271,9 @@ struct FakeState {
     sessions: Vec<SessionSummary>,
     pinned_messages: HashMap<i64, i32>,
     scheduled_messages: HashMap<i64, Vec<MessageSummary>>,
+    /// Remaining `get_scheduled_messages` reads that hide the newest created
+    /// schedule, reproducing the provider list lag after an accepted schedule.
+    scheduled_readback_lag_reads: usize,
     forum_topics: HashMap<i64, Vec<ForumTopicSummary>>,
     forum_topic_by_random_id: HashMap<i64, i32>,
     polls: HashMap<(i64, i32), PollSummary>,
@@ -2728,6 +2731,7 @@ impl FakeTelegramBackend {
                         forward_origin: None,
                     }],
                 )]),
+                scheduled_readback_lag_reads: 0,
                 forum_topics: HashMap::from([(202, vec![fixture_forum_topic()])]),
                 forum_topic_by_random_id: HashMap::new(),
                 polls: HashMap::from([((202, 20), fixture_poll)]),
@@ -3052,6 +3056,14 @@ impl FakeTelegramBackend {
     pub async fn mutation_call_counts(&self) -> (usize, usize) {
         let state = self.state.lock().await;
         (state.edit_calls, state.delete_calls)
+    }
+
+    /// Hide the newest created schedule from the next `reads` scheduled-list
+    /// read-backs, reproducing the provider list lag after an accepted schedule.
+    #[doc(hidden)]
+    pub async fn lag_scheduled_readback_for(&self, reads: usize) {
+        let mut state = self.state.lock().await;
+        state.scheduled_readback_lag_reads = reads;
     }
 
     #[doc(hidden)]
@@ -6692,10 +6704,21 @@ impl TelegramBackend for FakeTelegramBackend {
         _session_path: Option<PathBuf>,
         chat_id: &str,
     ) -> Result<Vec<MessageSummary>, TelegramError> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
         let canonical_id = Self::resolve_dialog(&state.dialogs, chat_id)
             .ok_or_else(|| TelegramError::PeerNotFound(chat_id.to_string()))?;
-        Ok(state.scheduled_messages.get(&canonical_id).cloned().unwrap_or_default())
+        let mut scheduled =
+            state.scheduled_messages.get(&canonical_id).cloned().unwrap_or_default();
+        if state.scheduled_readback_lag_reads > 0 {
+            state.scheduled_readback_lag_reads =
+                state.scheduled_readback_lag_reads.saturating_sub(1);
+            // `schedule_*_with_random_id` appends the created schedule at the end of
+            // the list, so the tail is exactly the effect the provider has not
+            // listed yet. Hiding by maximum id would hide a fixture message whose
+            // id is above the allocator's next id and prove nothing.
+            scheduled.pop();
+        }
+        Ok(scheduled)
     }
 
     async fn get_poll(
