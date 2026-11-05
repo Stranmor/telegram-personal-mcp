@@ -21,6 +21,71 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Client TL library that performs the deserialization.
+pub const TL_LIBRARY: &str = "ferogram-tl-types";
+
+/// Version of [`TL_LIBRARY`] the running binary was built against, read from
+/// `Cargo.lock` by `build.rs`.
+pub const TL_LIBRARY_VERSION: &str = env!("TL_STACK_FEROGRAM_TL_TYPES");
+
+/// TL layer compiled into the running binary.
+pub const TL_CLIENT_LAYER: i32 = ferogram::LAYER;
+
+/// Marker the TL deserializer emits for a constructor it cannot decode.
+const CONSTRUCTOR_MARKER: &str = "unexpected constructor id: ";
+
+/// A TL deserialization failure attributed to a specific constructor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlSchemaFault {
+    /// Constructor the server sent, as reported by the deserializer (`0x…`).
+    pub constructor: String,
+}
+
+impl TlSchemaFault {
+    /// Recognize a TL deserialization failure in a transport error message.
+    ///
+    /// Returns `None` for every other error, so unrelated failures keep their
+    /// existing classification.
+    pub fn parse(message: &str) -> Option<Self> {
+        let rest = message.split(CONSTRUCTOR_MARKER).nth(1)?;
+        let token: String = rest
+            .trim_start()
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric())
+            .collect();
+        let digits = token
+            .strip_prefix("0x")
+            .or_else(|| token.strip_prefix("0X"))?;
+        if digits.is_empty() || !digits.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(Self {
+            constructor: format!("0x{}", digits.to_ascii_lowercase()),
+        })
+    }
+
+    /// Reader-facing message: what broke, in which library, at which layer, and
+    /// where the repair belongs.
+    pub fn describe(&self) -> String {
+        format!(
+            "TL schema mismatch: Telegram sent TL constructor {} that the client cannot decode; \
+client TL schema is {TL_LIBRARY} {TL_LIBRARY_VERSION} (layer {TL_CLIENT_LAYER}). \
+The read path itself is healthy — the pinned TL layer is behind the server's serialization. \
+Repair belongs to the bridge (bump the TL layer); retrying the same request will not help.",
+            self.constructor
+        )
+    }
+
+    /// Machine-readable event line, one key per field, for the journal.
+    pub fn event_line(&self) -> String {
+        format!(
+            "event=tl_schema_mismatch library={TL_LIBRARY} version={TL_LIBRARY_VERSION} \
+layer={TL_CLIENT_LAYER} constructor={}",
+            self.constructor
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ToolOutcome<T> {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,6 +134,23 @@ impl ToolFailure {
 
 impl From<TelegramError> for ToolFailure {
     fn from(error: TelegramError) -> Self {
+        // A TL deserialization failure is schema drift, not a Telegram outage:
+        // name the library, version, layer and constructor before the generic
+        // classification can report it as a transport error. Only read-path
+        // errors carry the raw transport text; sends keep their
+        // delivery-uncertain semantics because the response never arrived.
+        if let TelegramError::Telegram(text) = &error {
+            if let Some(fault) = TlSchemaFault::parse(text) {
+                tracing::warn!("{}", fault.event_line());
+                return Self {
+                    code: "TL_SCHEMA_MISMATCH".to_string(),
+                    message: fault.describe(),
+                    retryable: false,
+                    retry_after_seconds: None,
+                    delivery_confirmed: false,
+                };
+            }
+        }
         if let TelegramError::FloodWait { seconds } = &error {
             return Self {
                 code: "FLOOD_WAIT".to_string(),
@@ -124,5 +206,43 @@ impl From<TelegramError> for ToolFailure {
             retry_after_seconds: None,
             delivery_confirmed: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The literal text ferogram emits when the server constructor is unknown.
+    const LIVE_FAILURE: &str = "deserialize error: unexpected constructor id: 0x3ae56482";
+
+    #[test]
+    fn live_constructor_failure_is_attributed_to_the_tl_stack() {
+        let fault = TlSchemaFault::parse(LIVE_FAILURE).expect("live text must classify");
+        assert_eq!(fault.constructor, "0x3ae56482");
+        assert_eq!(fault.event_line(), format!(
+            "event=tl_schema_mismatch library=ferogram-tl-types version={TL_LIBRARY_VERSION} layer={TL_CLIENT_LAYER} constructor=0x3ae56482"
+        ));
+        println!("{}", fault.event_line());
+    }
+
+    #[test]
+    fn describe_names_library_version_layer_and_constructor() {
+        let fault = TlSchemaFault::parse(LIVE_FAILURE).unwrap();
+        let described = fault.describe();
+        assert!(described.contains("0x3ae56482"), "{described}");
+        assert!(described.contains(TL_LIBRARY), "{described}");
+        assert!(described.contains(TL_LIBRARY_VERSION), "{described}");
+        assert!(
+            described.contains(&format!("layer {TL_CLIENT_LAYER}")),
+            "{described}"
+        );
+    }
+
+    #[test]
+    fn unrelated_errors_stay_unclassified() {
+        assert!(TlSchemaFault::parse("Telegram API error: FLOOD_WAIT_30").is_none());
+        assert!(TlSchemaFault::parse("Telegram API error: PEER_ID_INVALID").is_none());
+        assert!(TlSchemaFault::parse("unexpected constructor id: ").is_none());
     }
 }
