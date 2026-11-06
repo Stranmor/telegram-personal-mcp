@@ -23,7 +23,7 @@ use telegram_personal_mcp::{
         prepare_mcp_daemon, proxy_stdio, run_mcp_daemon, wait_for_matching_socket,
     },
 };
-use tracing::info;
+use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
@@ -259,13 +259,17 @@ async fn daemon(args: &Args) -> Result<()> {
     let prepared = prepare_mcp_daemon(paths.clone(), identity).map_err(anyhow::Error::new)?;
     info!(socket = %paths.socket_path.display(), "starting persistent MCP daemon");
     let server = build_server(args)?;
-    server.enforce_message_cache_retention_now().await.map_err(|error| {
-        anyhow::anyhow!(
-            "message-cache startup retention failed ({}): {}",
-            error.code,
-            error.message
-        )
-    })?;
+    // Retention is local maintenance, not readiness: a cache held by another
+    // writer is reported and retried later by the cache worker instead of
+    // killing the daemon before it can serve MCP requests.
+    if let Some(deferred) = server.enforce_message_cache_retention_for_startup().await {
+        warn!(
+            code = %deferred.code,
+            error = %deferred.message,
+            retryable = deferred.retryable,
+            "message-cache startup retention deferred; starting without it"
+        );
+    }
     let approval_worker = server
         .start_approval_worker()
         .context("failed to start the Telegram approval callback worker")?;

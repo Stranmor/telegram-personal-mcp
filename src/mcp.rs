@@ -140,6 +140,12 @@ pub const DEFAULT_MESSAGE_CACHE_POLL_INTERVAL: Duration = Duration::from_secs(2)
 /// top message advanced past the cached frontier pay a per-chat history call.
 pub const DEFAULT_MESSAGE_CACHE_RECONCILE_INTERVAL: Duration = Duration::from_secs(1800);
 const MESSAGE_CACHE_RETENTION_CHECK_INTERVAL: i64 = 24 * 60 * 60;
+/// Bounded attempts the daemon makes to prune local history before it starts.
+/// Retention is maintenance, never a readiness gate: a cache held by another
+/// writer must not stop the MCP transport from serving.
+pub const MESSAGE_CACHE_STARTUP_RETENTION_ATTEMPTS: u32 = 3;
+/// Pause between startup retention attempts while another writer holds the cache.
+pub const MESSAGE_CACHE_STARTUP_RETENTION_BACKOFF: Duration = Duration::from_secs(1);
 const MESSAGE_CACHE_RECONCILE_MAX_CHATS: usize = 50;
 const MESSAGE_CACHE_RECONCILE_LIMIT: usize = 200;
 const MAX_MESSAGE_CACHE_DIFFERENCE_SLICES: usize = 20;
@@ -4081,6 +4087,55 @@ impl McpServer {
     /// session. Daemon startup uses this before any background worker starts.
     pub async fn enforce_message_cache_retention_now(&self) -> Result<(), ToolFailure> {
         self.enforce_message_cache_retention_if_due(now_unix()).await
+    }
+
+    /// Startup retention that never gates readiness.
+    ///
+    /// A concurrent writer can hold the message cache beyond one lock wait; the
+    /// daemon must still serve MCP requests. This retries the prune a bounded
+    /// number of times and then hands the typed failure back as a deferral
+    /// receipt. Retention is not lost: every cache tool call and the background
+    /// worker rerun the same due-check, so the next free window prunes.
+    pub async fn enforce_message_cache_retention_for_startup(&self) -> Option<ToolFailure> {
+        match self
+            .enforce_message_cache_retention_with_retry(
+                MESSAGE_CACHE_STARTUP_RETENTION_ATTEMPTS,
+                MESSAGE_CACHE_STARTUP_RETENTION_BACKOFF,
+            )
+            .await
+        {
+            Ok(()) => None,
+            Err(deferred) => Some(deferred),
+        }
+    }
+
+    /// Retry local-history retention while another writer keeps the cache busy.
+    /// Non-retryable cache failures (schema, corruption, invalid policy) are
+    /// returned immediately instead of burning the retry budget.
+    pub async fn enforce_message_cache_retention_with_retry(
+        &self,
+        attempts: u32,
+        backoff: Duration,
+    ) -> Result<(), ToolFailure> {
+        let attempts = attempts.max(1);
+        let mut attempt = 1;
+        loop {
+            match self.enforce_message_cache_retention_now().await {
+                Ok(()) => return Ok(()),
+                Err(error) if error.retryable && attempt < attempts => {
+                    warn!(
+                        attempt,
+                        attempts,
+                        code = %error.code,
+                        error = %error.message,
+                        "message-cache retention deferred by cache contention"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    attempt = attempt.saturating_add(1);
+                },
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     pub fn message_cache_path(&self) -> &std::path::Path {
@@ -38173,6 +38228,7 @@ fn truncate_preview(text: &mut Option<String>, max_chars: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fake::FakeTelegramBackend;
 
     #[test]
     fn mutation_action_label_uses_the_serde_kind_not_the_first_key() {
@@ -38639,6 +38695,134 @@ mod tests {
                 .code,
             "STATE_INTEGRITY_ERROR"
         );
+    }
+
+    /// Live defect 2026-11-06: a foreign process held `message-cache.sqlite`
+    /// while the daemon started; retention returned CACHE_STORAGE_ERROR and the
+    /// daemon exited before the MCP transport came up. Retention must wait,
+    /// retry, and never gate readiness.
+    #[tokio::test]
+    async fn startup_retention_retries_around_a_contending_cache_writer() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache_path = temp.path().join("message-cache.sqlite");
+        seed_expired_cache_message(&cache_path);
+        let server = startup_retention_server(&temp, &cache_path);
+
+        let holder = rusqlite::Connection::open(&cache_path).expect("lock holder");
+        holder.execute_batch("BEGIN IMMEDIATE").expect("contending writer lock");
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            holder.execute_batch("ROLLBACK").expect("release writer lock");
+        });
+
+        assert!(
+            server.enforce_message_cache_retention_for_startup().await.is_none(),
+            "a lock released inside the retry budget must not be a deferral"
+        );
+        release.await.expect("release task");
+        let cache = MessageCache::open(&cache_path).expect("reopen cache");
+        assert!(
+            cache.exact_get(1, "chat", 1).expect("expired lookup").is_none(),
+            "the retried attempt prunes expired history"
+        );
+        assert!(cache.exact_get(1, "chat", 2).expect("recent lookup").is_some());
+    }
+
+    #[tokio::test]
+    async fn startup_retention_defers_a_cache_held_past_the_retry_budget() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache_path = temp.path().join("message-cache.sqlite");
+        seed_expired_cache_message(&cache_path);
+        let server = startup_retention_server(&temp, &cache_path);
+
+        let holder = rusqlite::Connection::open(&cache_path).expect("lock holder");
+        holder.execute_batch("BEGIN IMMEDIATE").expect("contending writer lock");
+        let deferred = server
+            .enforce_message_cache_retention_for_startup()
+            .await
+            .expect("a held cache is a typed deferral, not a fatal startup error");
+        assert_eq!(deferred.code, "CACHE_STORAGE_ERROR");
+        assert!(deferred.retryable);
+        assert!(
+            deferred.message.contains("database is locked"),
+            "deferral must carry the lock cause: {}",
+            deferred.message
+        );
+        holder.execute_batch("ROLLBACK").expect("release writer lock");
+
+        assert!(
+            server.enforce_message_cache_retention_for_startup().await.is_none(),
+            "the next free window prunes without a daemon restart"
+        );
+        let cache = MessageCache::open(&cache_path).expect("reopen cache");
+        assert!(cache.exact_get(1, "chat", 1).expect("expired lookup").is_none());
+    }
+
+    fn startup_retention_server(
+        temp: &tempfile::TempDir,
+        cache_path: &std::path::Path,
+    ) -> McpServer {
+        let mut server = McpServer::with_settings(
+            Arc::new(FakeTelegramBackend::fixture()),
+            McpServerSettings {
+                attachment_cache_dir: temp.path().join("attachments"),
+                max_download_bytes: 1024 * 1024,
+                max_upload_bytes: 1024 * 1024,
+                state_db_path: temp.path().join("state.sqlite"),
+            },
+        )
+        .with_message_cache_path(cache_path.to_path_buf())
+        .with_message_cache_max_age_days(1)
+        .expect("retention policy");
+        // Production waits five seconds per attempt; the test shortens the wait
+        // so contention is observable without weakening the retry policy.
+        server.message_cache = server.message_cache.with_busy_timeout(Duration::from_millis(100));
+        server
+    }
+
+    fn seed_expired_cache_message(cache_path: &std::path::Path) {
+        let cache = MessageCache::open(cache_path).expect("open cache");
+        let now = now_unix();
+        cache
+            .bind_account(&AccountMetadata {
+                account_user_id: 1,
+                display_name: Some("probe".to_string()),
+                username: None,
+                observed_at_unix: now,
+            })
+            .expect("bind account");
+        let expired_date = i32::try_from(now - 2 * 86_400).expect("expired date");
+        let recent_date = i32::try_from(now).expect("recent date");
+        for (message_id, date) in [(1, expired_date), (2, recent_date)] {
+            cache
+                .upsert_message(
+                    1,
+                    &CachedMessageInput {
+                        chat_id: "chat".to_string(),
+                        message: MessageSummary {
+                            message_id,
+                            chat_ref: None,
+                            sender_ref: None,
+                            outgoing: false,
+                            pinned: false,
+                            silent: false,
+                            noforwards: false,
+                            text: Some("probe".to_string()),
+                            date,
+                            edit_date: None,
+                            reply_to_message_id: None,
+                            views: None,
+                            forwards: None,
+                            reply_count: None,
+                            media_type: None,
+                            forward_origin: None,
+                        },
+                        observed_at_unix: now,
+                        source: MessageSource::DialogHistory,
+                    },
+                )
+                .expect("seed message");
+        }
     }
 }
 

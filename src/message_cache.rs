@@ -19,6 +19,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -435,11 +436,12 @@ pub struct MessageRetentionResult {
 pub struct MessageCache {
     path: PathBuf,
     max_age_days: Option<u32>,
+    busy_timeout: Option<Duration>,
 }
 
 impl MessageCache {
     pub fn new(path: PathBuf) -> Self {
-        Self { path, max_age_days: None }
+        Self { path, max_age_days: None, busy_timeout: None }
     }
 
     pub fn open(path: impl Into<PathBuf>) -> MessageCacheResult<Self> {
@@ -465,6 +467,15 @@ impl MessageCache {
         validate_retention_days(max_age_days)?;
         self.max_age_days = Some(max_age_days);
         Ok(self)
+    }
+
+    /// Bound how long one cache operation waits for a concurrent writer before
+    /// SQLite reports `SQLITE_BUSY`. The default keeps the shared five-second
+    /// state-store policy; a maintenance caller with its own retry budget can
+    /// shorten it so contention fails fast and the retry loop stays bounded.
+    pub fn with_busy_timeout(mut self, busy_timeout: Duration) -> Self {
+        self.busy_timeout = Some(busy_timeout);
+        self
     }
 
     pub fn initialize(&self) -> MessageCacheResult<()> {
@@ -2105,7 +2116,14 @@ impl MessageCache {
     }
 
     fn connection(&self) -> MessageCacheResult<Connection> {
-        let mut connection = open_private_wal(&self.path, SynchronousMode::Normal)?;
+        let mut connection = match self.busy_timeout {
+            Some(busy_timeout) => crate::state_db::open_private_wal_with_busy_timeout(
+                &self.path,
+                SynchronousMode::Normal,
+                busy_timeout,
+            )?,
+            None => open_private_wal(&self.path, SynchronousMode::Normal)?,
+        };
         initialize_or_validate_schema(&mut connection)?;
         restrict_private_sqlite_files(&self.path)?;
         Ok(connection)

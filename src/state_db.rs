@@ -23,6 +23,10 @@ impl SynchronousMode {
     }
 }
 
+/// How long a state-store call waits for a concurrent SQLite writer before it
+/// reports `SQLITE_BUSY`.
+pub const DEFAULT_SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Opens a private SQLite database with the state-store invariants used by this crate.
 ///
 /// The caller selects only the durability trade-off. Journal mode, foreign-key
@@ -31,11 +35,22 @@ pub fn open_private_wal(
     path: impl AsRef<Path>,
     synchronous: SynchronousMode,
 ) -> rusqlite::Result<Connection> {
+    open_private_wal_with_busy_timeout(path, synchronous, DEFAULT_SQLITE_BUSY_TIMEOUT)
+}
+
+/// Opens the same state store with an explicit lock-wait budget. Maintenance
+/// paths that must stay bounded (for example startup retention retried under a
+/// bounded deadline) shorten the wait instead of blocking a fixed five seconds.
+pub fn open_private_wal_with_busy_timeout(
+    path: impl AsRef<Path>,
+    synchronous: SynchronousMode,
+    busy_timeout: Duration,
+) -> rusqlite::Result<Connection> {
     let path = path.as_ref();
     prepare_private_path(path).map_err(io_to_sql)?;
 
     let connection = Connection::open(path)?;
-    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.busy_timeout(busy_timeout)?;
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", synchronous.sqlite_value())?;
@@ -113,6 +128,18 @@ mod tests {
             .pragma_query_value(None, "synchronous", |row| row.get(0))
             .expect("synchronous");
         assert_eq!(synchronous, 1);
+        drop(connection);
+
+        let bounded = open_private_wal_with_busy_timeout(
+            &path,
+            SynchronousMode::Normal,
+            Duration::from_millis(250),
+        )
+        .expect("open with bounded lock wait");
+        let busy_timeout: i64 = bounded
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .expect("bounded busy timeout");
+        assert_eq!(busy_timeout, 250);
     }
 
     #[cfg(unix)]

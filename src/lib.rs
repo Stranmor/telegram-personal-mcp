@@ -97,7 +97,8 @@ pub use fake::{FakeInlineBotResultSend, FakeInviteOutcome, FakeTelegramBackend};
 pub use ledger::{ApprovalRequestRecord, PreparedSendRecord, SendLedger, SendLedgerReader};
 pub use mcp::{
     DEFAULT_MAX_DOWNLOAD_BYTES, DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_MESSAGE_CACHE_POLL_INTERVAL,
-    DEFAULT_MESSAGE_CACHE_RECONCILE_INTERVAL, McpServer, McpServerSettings, MessageCacheWorker,
+    DEFAULT_MESSAGE_CACHE_RECONCILE_INTERVAL, MESSAGE_CACHE_STARTUP_RETENTION_ATTEMPTS,
+    MESSAGE_CACHE_STARTUP_RETENTION_BACKOFF, McpServer, McpServerSettings, MessageCacheWorker,
 };
 pub use message_cache::{
     AccountCacheStats, AccountMetadata, CacheSyncPhase, CacheUpdateBatch, CachedMessage,
