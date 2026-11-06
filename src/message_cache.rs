@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const MESSAGE_CACHE_SCHEMA_VERSION: i64 = 5;
+pub const MESSAGE_CACHE_SCHEMA_VERSION: i64 = 6;
 pub const MAX_MESSAGE_QUERY_ROWS: usize = 1_000;
 pub const MAX_REGEX_PATTERN_BYTES: usize = 512;
 pub const MAX_REGEX_SCAN_ROWS: usize = 10_000;
@@ -36,6 +36,22 @@ const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 const MESSAGE_CACHE_APPLICATION_ID: i64 = 0x544d_4348; // "TMCH"
 const MESSAGE_CACHE_KIND: &str = "telegram_message_cache";
 const CSV_HEADER: &str = "account_user_id,chat_id,message_id,sender_ref,text,date_unix,edit_date,observed_at_unix,source,message_json\r\n";
+
+/// Global deletions are keyed by `(account_user_id, message_id)` alone, so the
+/// statement must be able to seek `cache_messages` on exactly that pair
+/// (`cache_messages_account_message`); otherwise SQLite walks every stored
+/// message of the account per deleted message (measured: ~12 GiB read per
+/// deletion on a live 12.25 GiB cache). Without `sqlite_stat1` the planner
+/// still prefers the primary key's partial prefix `account_user_id=?`, so the
+/// index is pinned explicitly and the plan cannot silently regress.
+const DELETE_GLOBAL_MESSAGES_SQL: &str = "DELETE FROM cache_messages
+     INDEXED BY cache_messages_account_message
+     WHERE account_user_id = ?1 AND message_id = ?2
+       AND chat_id NOT IN (
+           SELECT chat_id FROM cache_dialogs
+           WHERE account_user_id = ?1
+             AND chat_kind IN ('channel', 'supergroup', 'gigagroup')
+       )";
 
 #[derive(Debug, Error)]
 pub enum MessageCacheError {
@@ -1443,15 +1459,7 @@ impl MessageCache {
                    ))
                  ORDER BY messages.chat_id ASC",
             )?;
-            let mut remove_messages = transaction.prepare(
-                "DELETE FROM cache_messages
-                 WHERE account_user_id = ?1 AND message_id = ?2
-                   AND chat_id NOT IN (
-                       SELECT chat_id FROM cache_dialogs
-                       WHERE account_user_id = ?1
-                         AND chat_kind IN ('channel', 'supergroup', 'gigagroup')
-                   )",
-            )?;
+            let mut remove_messages = transaction.prepare(DELETE_GLOBAL_MESSAGES_SQL)?;
             let mut upsert_global_tombstone = transaction.prepare(
                 "INSERT INTO cache_global_tombstones (
                      account_user_id, message_id, deleted_at_unix
@@ -2310,6 +2318,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> MessageCacheRes
         transaction.execute_batch(SCHEMA_V3)?;
         transaction.execute_batch(SCHEMA_V4)?;
         transaction.execute_batch(SCHEMA_V5)?;
+        transaction.execute_batch(SCHEMA_V6)?;
         transaction.execute(
             "INSERT INTO cache_meta (singleton, database_kind, schema_version)
              VALUES (1, ?1, ?2)",
@@ -2382,6 +2391,9 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> MessageCacheRes
         }
         if user_version <= 4 {
             transaction.execute_batch(SCHEMA_V5)?;
+        }
+        if user_version <= 5 {
+            transaction.execute_batch(SCHEMA_V6)?;
         }
         transaction.execute(
             "UPDATE cache_meta SET schema_version = ?1 WHERE singleton = 1",
@@ -3314,6 +3326,9 @@ ON cache_messages(account_user_id, chat_id, date_unix DESC, message_id DESC);
 CREATE INDEX cache_messages_sender
 ON cache_messages(account_user_id, sender_ref, date_unix DESC);
 
+CREATE INDEX cache_messages_account_message
+ON cache_messages(account_user_id, message_id);
+
 CREATE TABLE cache_sync_state (
     account_user_id INTEGER NOT NULL REFERENCES cache_accounts(account_user_id) ON DELETE CASCADE,
     chat_id TEXT NOT NULL,
@@ -3420,6 +3435,11 @@ CREATE TABLE cache_chat_revisions (
 ) WITHOUT ROWID;
 "#;
 
+const SCHEMA_V6: &str = r#"
+CREATE INDEX IF NOT EXISTS cache_messages_account_message
+ON cache_messages(account_user_id, message_id);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3430,6 +3450,32 @@ mod tests {
         let cache = MessageCache::open(temp.path().join("state").join("messages.sqlite"))
             .expect("open cache");
         (temp, cache)
+    }
+
+    fn user_indexes(connection: &Connection) -> BTreeSet<String> {
+        let mut statement = connection
+            .prepare(
+                "SELECT name FROM sqlite_schema
+                 WHERE type = 'index' AND name NOT LIKE 'sqlite_%'
+                 ORDER BY name",
+            )
+            .expect("prepare index listing");
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("list indexes")
+            .collect::<rusqlite::Result<BTreeSet<_>>>()
+            .expect("collect indexes")
+    }
+
+    fn global_delete_plan(connection: &Connection) -> Vec<String> {
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {DELETE_GLOBAL_MESSAGES_SQL}"))
+            .expect("prepare query plan");
+        statement
+            .query_map(params![7_i64, 11_i64], |row| row.get::<_, String>(3))
+            .expect("plan rows")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect plan")
     }
 
     fn bind(cache: &MessageCache, account_user_id: i64) {
@@ -3503,7 +3549,7 @@ mod tests {
 
         assert!(matches!(
             MessageCache::open(path),
-            Err(MessageCacheError::UnsupportedSchema { found: 6, supported: 5 })
+            Err(MessageCacheError::UnsupportedSchema { found: 7, supported: 6 })
         ));
     }
 
@@ -3693,6 +3739,75 @@ mod tests {
             connection.pragma_query_value(None, "user_version", |row| row.get(0)).expect("version");
         assert_eq!(version, MESSAGE_CACHE_SCHEMA_VERSION);
         assert_eq!(user_tables(&connection).expect("tables"), expected_tables(5));
+    }
+
+    #[test]
+    fn fresh_schema_indexes_global_deletion_by_account_and_message() {
+        let (_temp, cache) = cache();
+        let path = cache.path().to_path_buf();
+        drop(cache);
+
+        let connection = Connection::open(&path).expect("raw open");
+        let version: i64 =
+            connection.pragma_query_value(None, "user_version", |row| row.get(0)).expect("version");
+        assert_eq!(version, MESSAGE_CACHE_SCHEMA_VERSION);
+        let indexes = user_indexes(&connection);
+        assert!(indexes.contains("cache_messages_account_message"), "indexes={indexes:?}");
+        let plan = global_delete_plan(&connection);
+        assert!(
+            plan.iter().any(|detail| detail.contains("cache_messages_account_message")),
+            "global delete must seek the account/message index; plan={plan:?}"
+        );
+    }
+
+    #[test]
+    fn migrates_v5_forward_with_account_message_index() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("messages.sqlite");
+        let connection = Connection::open(&path).expect("raw open");
+        connection.execute_batch(SCHEMA_V1).expect("create v1 schema");
+        connection.execute_batch(SCHEMA_V2).expect("create v2 schema");
+        connection.execute_batch(SCHEMA_V3).expect("create v3 schema");
+        connection.execute_batch(SCHEMA_V4).expect("create v4 schema");
+        connection.execute_batch(SCHEMA_V5).expect("create v5 schema");
+        connection
+            .execute_batch("DROP INDEX cache_messages_account_message")
+            .expect("strip the index a pre-v6 database does not carry");
+        connection
+            .execute(
+                "INSERT INTO cache_meta (singleton, database_kind, schema_version)
+                 VALUES (1, ?1, 5)",
+                [MESSAGE_CACHE_KIND],
+            )
+            .expect("v5 metadata");
+        connection
+            .execute(
+                "INSERT INTO cache_accounts (
+                     account_user_id, display_name, username, observed_at_unix, generation
+                 ) VALUES (7, 'Account 7', 'user7', 10, 0)",
+                [],
+            )
+            .expect("v5 account");
+        connection
+            .pragma_update(None, "application_id", MESSAGE_CACHE_APPLICATION_ID)
+            .expect("application id");
+        connection.pragma_update(None, "user_version", 5_i64).expect("v5 version");
+        drop(connection);
+
+        let migrated = MessageCache::open(&path).expect("migrate");
+        assert_eq!(migrated.chat_revision(7, "chat").expect("initial revision"), 0);
+        let connection = Connection::open(&path).expect("inspect migrated db");
+        let version: i64 =
+            connection.pragma_query_value(None, "user_version", |row| row.get(0)).expect("version");
+        assert_eq!(version, MESSAGE_CACHE_SCHEMA_VERSION);
+        assert_eq!(user_tables(&connection).expect("tables"), expected_tables(6));
+        let indexes = user_indexes(&connection);
+        assert!(indexes.contains("cache_messages_account_message"), "indexes={indexes:?}");
+        let plan = global_delete_plan(&connection);
+        assert!(
+            plan.iter().any(|detail| detail.contains("cache_messages_account_message")),
+            "migrated database must serve global deletes from the index; plan={plan:?}"
+        );
     }
 
     #[test]
