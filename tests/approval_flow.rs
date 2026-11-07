@@ -363,6 +363,33 @@ async fn scheduled_rich_text_is_refused_while_html_schedules_a_nonempty_body() -
         Some("RICH_SCHEDULE_UNSUPPORTED")
     );
 
+    // Markup that renders to no text is the same defect under a supported mode.
+    let markup_only = client
+        .call_tool(
+            CallToolRequestParams::new("prepare_schedule_message").with_arguments(
+                json!({
+                    "chat_id": "@alex",
+                    "text": "<b></b>",
+                    "parse_mode": "html",
+                    "source": { "kind": "self_originated" },
+                    "schedule_at_unix": schedule_at_unix
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(markup_only.is_error, Some(true));
+    assert_eq!(
+        markup_only
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/error/code"))
+            .and_then(|value| value.as_str()),
+        Some("SCHEDULED_MESSAGE_TEXT_EMPTY")
+    );
+
     // html keeps the supported path: the scheduled body is readable in the readback.
     let html = "<b>Заголовок</b><br><br>Текст поста";
     let prepared = client
@@ -2011,6 +2038,34 @@ async fn mutation_buttons_apply_once_and_cancel_without_side_effects() -> anyhow
         .await;
     wait_for_answers(&bot, answers_before_duplicate.saturating_add(1)).await?;
     assert_eq!(backend.sent_messages().await.len(), sent_count_before_duplicate);
+
+    let refused_rich_scheduled_file = client
+        .call_tool(
+            CallToolRequestParams::new("prepare_schedule_file_message").with_arguments(
+                json!({
+                    "chat_id": "@alex",
+                    "file_path": approved_file_path,
+                    "caption": "Rich scheduled evidence",
+                    "parse_mode": "rich_markdown",
+                    "source": { "kind": "self_originated" },
+                    "schedule_at_unix": 2_000_000_300,
+                    "approved_sha256": approved_file_sha256
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(refused_rich_scheduled_file.is_error, Some(true));
+    assert_eq!(
+        refused_rich_scheduled_file
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/error/code"))
+            .and_then(|value| value.as_str()),
+        Some("RICH_SCHEDULE_UNSUPPORTED")
+    );
 
     let prepared_scheduled_file = client
         .call_tool(

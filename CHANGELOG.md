@@ -60,15 +60,22 @@ and releases use [Semantic Versioning](https://semver.org/).
   five-second busy timeout; it is not a hard whole-process shutdown bound.
 
 ### Fixed
-- Scheduled text with `parse_mode: rich_markdown` is refused with
-  `RICH_SCHEDULE_UNSUPPORTED` before any network call: a scheduled rich
-  message exposes its native blocks but no readable body in the schedule
-  readback, so the desk could neither verify nor repair the post that would
-  publish, and an edit could silently replace it. `html`, `markdown` and
-  `plain` remain supported for scheduled text; rich markdown stays available
-  for immediate sends. Editing a scheduled message that carries no readable
-  text now requires explicit replacement text
-  (`SCHEDULED_MESSAGE_TEXT_UNREADABLE`) instead of writing an empty body.
+- A scheduled post can no longer be prepared with a body the desk cannot
+  read: `parse_mode: rich_markdown` is refused with `RICH_SCHEDULE_UNSUPPORTED`
+  for scheduled text posts and scheduled media captions before any network
+  call, and a body whose markup renders no text (for example `html` `<b></b>`)
+  is refused with `SCHEDULED_MESSAGE_TEXT_EMPTY`. The schedule readback shows
+  native rich blocks and their count, but not the readable body text, so the
+  desk could not tell what text a scheduled rich post would publish and an
+  edit could silently replace it. `html`, `markdown` and `plain` remain
+  supported for scheduled text and captions, rich markdown stays available for
+  immediate sends and immediate rich media captions, and a retry of an
+  already-attempted rich mutation still reconciles through its idempotent
+  readback instead of being stranded.
+- Editing a scheduled message that carries no readable body now requires
+  explicit replacement text (`SCHEDULED_MESSAGE_TEXT_UNREADABLE`) instead of
+  silently writing an empty body; a captionless scheduled photo or file keeps
+  its time-only reschedule.
 - The approval demo no longer turns a slow host into a failure: it waits for the
   approval worker up to a wall-clock deadline instead of a fixed tick count, and
   it retries the state store's `STATE_STORE_ERROR` answers that the store marks

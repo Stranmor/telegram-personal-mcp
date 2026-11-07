@@ -7995,7 +7995,7 @@ impl McpServer {
             .map_err(|error| Json(ToolOutcome::failure(error)))?;
         reject_unsupported_schedule_parse_mode(args.parse_mode)
             .map_err(|error| Json(ToolOutcome::failure(error)))?;
-        validate_mutation_text(&args.text, "prepare_schedule_message.text")
+        validate_scheduled_text_body(&args.text, args.parse_mode, "prepare_schedule_message.text")
             .map_err(|error| Json(ToolOutcome::failure(error)))?;
         if args.reply_to_message_id.is_some_and(|message_id| message_id <= 0) {
             return Err(Json(ToolOutcome::failure(ToolFailure::invalid_argument(
@@ -8115,9 +8115,14 @@ impl McpServer {
                 "prepare_edit_scheduled_message.message_id must be positive",
             ))));
         }
-        if let Some(text) = &args.text {
-            validate_mutation_text(text, "prepare_edit_scheduled_message.text")
-                .map_err(|error| Json(ToolOutcome::failure(error)))?;
+        let had_explicit_text = args.text.is_some();
+        if had_explicit_text {
+            validate_scheduled_text_body(
+                args.text.as_deref().unwrap_or_default(),
+                args.parse_mode,
+                "prepare_edit_scheduled_message.text",
+            )
+            .map_err(|error| Json(ToolOutcome::failure(error)))?;
         }
         if args.text.is_none() && args.schedule_at_unix.is_none() && !args.send_when_online {
             return Err(Json(ToolOutcome::failure(ToolFailure::invalid_argument(
@@ -8159,18 +8164,16 @@ impl McpServer {
             "prepare_edit_scheduled_message",
         )
         .map_err(|error| Json(ToolOutcome::failure(error)))?;
-        let text = match (args.text, current.text.clone()) {
-            (Some(text), _) => text,
-            (None, Some(text)) => text,
-            (None, None) => {
-                return Err(Json(ToolOutcome::failure(ToolFailure::new(
-                    "SCHEDULED_MESSAGE_TEXT_UNREADABLE",
-                    "the scheduled message carries no readable text (native rich scheduling is \
-                     unsupported); pass explicit text with parse_mode html",
-                    false,
-                ))))
-            },
-        };
+        let (text, captionless_media) = scheduled_edit_text(args.text, current)
+            .map_err(|error| Json(ToolOutcome::failure(error)))?;
+        if !had_explicit_text && !captionless_media {
+            validate_scheduled_text_body(
+                &text,
+                args.parse_mode,
+                "prepare_edit_scheduled_message.text",
+            )
+            .map_err(|error| Json(ToolOutcome::failure(error)))?;
+        }
         if current.text.as_deref().unwrap_or_default() == text && current.date == schedule_date_unix
         {
             return Err(Json(ToolOutcome::failure(ToolFailure::new(
@@ -16600,6 +16603,7 @@ impl McpServer {
         const TOOL_NAME: &str = "prepare_schedule_file_message";
         validate_chat_id(&args.chat_id, TOOL_NAME)?;
         validate_caption(&args.caption, &format!("{TOOL_NAME}.caption"))?;
+        reject_unsupported_schedule_parse_mode(args.parse_mode)?;
         let client_mutation_id = args.client_mutation_id.clone();
         if let Some(client_mutation_id) = client_mutation_id.as_deref() {
             validate_client_mutation_id(client_mutation_id, TOOL_NAME)?;
@@ -21133,7 +21137,6 @@ impl McpServer {
                 noforwards,
                 random_id,
             } => {
-                reject_unsupported_schedule_parse_mode(*parse_mode)?;
                 if *schedule_date_unix != SCHEDULE_WHEN_ONLINE_DATE
                     && i64::from(*schedule_date_unix) <= now_unix()
                 {
@@ -21169,6 +21172,11 @@ impl McpServer {
                     }
                 }
                 let reply_to_message_id = reply_to.as_ref().map(|reply| reply.message_id);
+                if !recovering_unknown {
+                    // A fresh rich schedule is refused, but a retry of an already-attempted
+                    // mutation must still reach its idempotent reconciliation below.
+                    reject_unsupported_schedule_parse_mode(*parse_mode)?;
+                }
                 let message_id = match self
                     .backend
                     .schedule_text_with_random_id(
@@ -21338,6 +21346,11 @@ impl McpServer {
                         "could not prove an exact scheduled-file outcome; the approved file will not be sent again automatically",
                     ));
                 }
+                if !recovering_unknown {
+                    // A fresh rich scheduled file is refused, but a retry of an already-attempted
+                    // mutation must still reach its reconciliation and idempotent retry below.
+                    reject_unsupported_schedule_parse_mode(*caption_parse_mode)?;
+                }
                 let message_id = match self
                     .backend
                     .schedule_file_with_random_id(
@@ -21419,7 +21432,6 @@ impl McpServer {
                 parse_mode,
                 schedule_date_unix,
             } => {
-                reject_unsupported_schedule_parse_mode(*parse_mode)?;
                 let scheduled = self
                     .backend
                     .get_scheduled_messages(Some(selected_session.clone()), chat_id)
@@ -21485,6 +21497,11 @@ impl McpServer {
                         ),
                         false,
                     ));
+                }
+                if !recovering_unknown {
+                    // A fresh rich edit is refused, but a retry of an already-attempted edit must
+                    // still reach the reconciliation checks above and the idempotent retry below.
+                    reject_unsupported_schedule_parse_mode(*parse_mode)?;
                 }
                 match self
                     .backend
@@ -35093,6 +35110,45 @@ fn validate_mutation_text(text: &str, field: &str) -> Result<(), ToolFailure> {
     Ok(())
 }
 
+fn validate_scheduled_text_body(
+    text: &str,
+    parse_mode: CaptionParseMode,
+    field: &str,
+) -> Result<(), ToolFailure> {
+    validate_mutation_text(text, field)?;
+    if parsed_caption_text(text, parse_mode).trim().is_empty() {
+        return Err(ToolFailure::new(
+            "SCHEDULED_MESSAGE_TEXT_EMPTY",
+            format!(
+                "{field} renders no readable text with parse_mode {parse_mode:?}; a scheduled \
+                 post must carry a body the desk can read back"
+            ),
+            false,
+        ));
+    }
+    Ok(())
+}
+
+/// Resolves the body a scheduled message edit will write. `captionless_media` marks the one case
+/// where an empty body is legitimate: a scheduled photo or file has no caption and only its
+/// delivery time changes, so the edit keeps the caption empty instead of dropping the schedule.
+fn scheduled_edit_text(
+    args_text: Option<String>,
+    current: &MessageSummary,
+) -> Result<(String, bool), ToolFailure> {
+    match (args_text, current.text.clone()) {
+        (Some(text), _) => Ok((text, false)),
+        (None, Some(text)) => Ok((text, false)),
+        (None, None) if current.media_type.is_some() => Ok((String::new(), true)),
+        (None, None) => Err(ToolFailure::new(
+            "SCHEDULED_MESSAGE_TEXT_UNREADABLE",
+            "the scheduled text message carries no readable body (native rich scheduling is \
+             unsupported); pass explicit text with parse_mode html",
+            false,
+        )),
+    }
+}
+
 fn validate_poll_create_args(args: &PrepareCreatePollArgs) -> Result<PollCreateSpec, ToolFailure> {
     if args.question.trim().is_empty() {
         return Err(ToolFailure::invalid_argument(
@@ -38253,17 +38309,72 @@ mod tests {
 
     #[test]
     fn scheduled_text_rejects_rich_markdown() {
-        // Live defect 2026-10-31: the agent could not tell a scheduled rich body from an empty
-        // one (the readback exposes the rich payload but no readable text), so a public post risked
-        // publishing an unverifiable body. A scheduled text post must have a body the desk can
-        // verify; rich_markdown stays available for immediate sends and is refused up front here.
+        // Live incident 2026-10-31: a scheduled rich text exposes a native block count but no
+        // readable body in the schedule readback, so the desk cannot read the post it schedules;
+        // that schedule had to be rewritten as html. rich_markdown stays available for immediate
+        // sends and is refused up front for scheduled text.
         let error = reject_unsupported_schedule_parse_mode(CaptionParseMode::RichMarkdown)
             .expect_err("rich_markdown must be refused for scheduled text");
         assert_eq!(error.code, "RICH_SCHEDULE_UNSUPPORTED");
+        assert!(!error.retryable, "the refusal is terminal and must not retry");
         for allowed in [CaptionParseMode::Plain, CaptionParseMode::Markdown, CaptionParseMode::Html] {
             reject_unsupported_schedule_parse_mode(allowed)
                 .expect("plain, md and html stay schedulable");
         }
+    }
+
+    #[test]
+    fn scheduled_text_body_must_render_readable_text() {
+        assert!(validate_scheduled_text_body("Post body", CaptionParseMode::Plain, "probe").is_ok());
+        assert!(
+            validate_scheduled_text_body("<b>Post</b>", CaptionParseMode::Html, "probe").is_ok()
+        );
+        for markup_only in ["<b></b>", "<b> </b>", "<i>\n</i>"] {
+            let error = validate_scheduled_text_body(markup_only, CaptionParseMode::Html, "probe")
+                .expect_err("a markup-only body renders no text and must be refused");
+            assert_eq!(error.code, "SCHEDULED_MESSAGE_TEXT_EMPTY");
+        }
+    }
+
+    #[test]
+    fn scheduled_edit_keeps_captionless_media_and_refuses_textless_text() {
+        fn summary(media_type: Option<&str>, text: Option<&str>) -> MessageSummary {
+            MessageSummary {
+                message_id: 1,
+                chat_ref: Some("1".to_string()),
+                sender_ref: Some("1".to_string()),
+                outgoing: true,
+                pinned: false,
+                silent: false,
+                noforwards: false,
+                text: text.map(str::to_string),
+                date: 1_800_000_000,
+                edit_date: None,
+                reply_to_message_id: None,
+                views: None,
+                forwards: None,
+                reply_count: None,
+                media_type: media_type.map(str::to_string),
+                forward_origin: None,
+            }
+        }
+
+        let captionless_photo = summary(Some("photo"), None);
+        let (text, captionless_media) = scheduled_edit_text(None, &captionless_photo)
+            .expect("a captionless scheduled photo keeps its time-only reschedule");
+        assert!(text.is_empty());
+        assert!(captionless_media);
+
+        let textless_text = summary(None, None);
+        let error = scheduled_edit_text(None, &textless_text)
+            .expect_err("scheduled text without a readable body needs explicit text");
+        assert_eq!(error.code, "SCHEDULED_MESSAGE_TEXT_UNREADABLE");
+
+        let (text, captionless_media) =
+            scheduled_edit_text(Some("Изменённый текст".to_string()), &textless_text)
+                .expect("explicit text replaces an unreadable body");
+        assert_eq!(text, "Изменённый текст");
+        assert!(!captionless_media);
     }
 
     #[test]
