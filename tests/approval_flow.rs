@@ -302,7 +302,7 @@ async fn scheduled_approval_expiry_is_capped_to_the_delivery_time() -> anyhow::R
 }
 
 #[tokio::test]
-async fn current_session_scheduled_rich_text_is_structured_for_send_and_edit() -> anyhow::Result<()>
+async fn scheduled_rich_text_is_refused_while_html_schedules_a_nonempty_body() -> anyhow::Result<()>
 {
     let backend = Arc::new(FakeTelegramBackend::fixture());
     let bot = Arc::new(FakeApprovalBot::default());
@@ -337,7 +337,7 @@ async fn current_session_scheduled_rich_text_is_structured_for_send_and_edit() -
         i32::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().saturating_add(600))?;
     let markdown = "# Native scheduled Rich Text\n\n- **Bold**\n- _Italic_";
 
-    let prepared = client
+    let refused = client
         .call_tool(
             CallToolRequestParams::new("prepare_schedule_message").with_arguments(
                 json!({
@@ -353,15 +353,35 @@ async fn current_session_scheduled_rich_text_is_structured_for_send_and_edit() -
             ),
         )
         .await?;
-    assert_eq!(prepared.is_error, Some(false));
+    assert_eq!(refused.is_error, Some(true));
     assert_eq!(
-        prepared
+        refused
             .structured_content
             .as_ref()
-            .and_then(|value| value.pointer("/data/action/parse_mode"))
+            .and_then(|value| value.pointer("/error/code"))
             .and_then(|value| value.as_str()),
-        Some("rich_markdown")
+        Some("RICH_SCHEDULE_UNSUPPORTED")
     );
+
+    // html keeps the supported path: the scheduled body is readable in the readback.
+    let html = "<b>Заголовок</b><br><br>Текст поста";
+    let prepared = client
+        .call_tool(
+            CallToolRequestParams::new("prepare_schedule_message").with_arguments(
+                json!({
+                    "chat_id": "@alex",
+                    "text": html,
+                    "parse_mode": "html",
+                    "source": { "kind": "self_originated" },
+                    "schedule_at_unix": schedule_at_unix
+                })
+                .as_object()
+                .expect("object")
+                .clone(),
+            ),
+        )
+        .await?;
+    assert_eq!(prepared.is_error, Some(false));
     let mutation_id = prepared
         .structured_content
         .as_ref()
@@ -380,7 +400,7 @@ async fn current_session_scheduled_rich_text_is_structured_for_send_and_edit() -
                 json!({
                     "mutation_id": mutation_id,
                     "approved_payload_sha256": payload_sha256,
-                    "current_session_approval": "Ivan explicitly confirmed this exact scheduled rich-text mutation in the current chat"
+                    "current_session_approval": "Ivan explicitly confirmed this exact scheduled html mutation in the current chat"
                 })
                 .as_object()
                 .expect("object")
@@ -393,16 +413,18 @@ async fn current_session_scheduled_rich_text_is_structured_for_send_and_edit() -
     let created = scheduled
         .iter()
         .find(|message| message.date == schedule_at_unix)
-        .expect("scheduled rich message");
-    assert_eq!(created.text, None);
-    let rich = backend
-        .get_rich_message_snapshot(None, "@alex", created.message_id)
-        .await?
-        .expect("native rich message snapshot");
-    assert!(rich.block_count > 0);
+        .expect("scheduled html message");
+    assert_eq!(created.media_type, None);
+    assert!(
+        created
+            .text
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty()),
+        "a scheduled post must carry a readable body"
+    );
 
     let edit_schedule_at_unix = schedule_at_unix.saturating_add(60);
-    let prepared_edit = client
+    let refused_edit = client
         .call_tool(
             CallToolRequestParams::new("prepare_edit_scheduled_message").with_arguments(
                 json!({
@@ -418,47 +440,25 @@ async fn current_session_scheduled_rich_text_is_structured_for_send_and_edit() -
             ),
         )
         .await?;
-    assert_eq!(prepared_edit.is_error, Some(false));
-    let edit_mutation_id = prepared_edit
-        .structured_content
-        .as_ref()
-        .and_then(|value| value.pointer("/data/mutation_id"))
-        .and_then(|value| value.as_str())
-        .expect("edit mutation id");
-    let edit_payload_sha256 = prepared_edit
-        .structured_content
-        .as_ref()
-        .and_then(|value| value.pointer("/data/payload_sha256"))
-        .and_then(|value| value.as_str())
-        .expect("edit payload hash");
-    let applied_edit = client
-        .call_tool(
-            CallToolRequestParams::new("apply_current_session_scheduled_mutation").with_arguments(
-                json!({
-                    "mutation_id": edit_mutation_id,
-                    "approved_payload_sha256": edit_payload_sha256,
-                    "current_session_approval": "Ivan explicitly confirmed this exact scheduled rich-text edit in the current chat"
-                })
-                .as_object()
-                .expect("object")
-                .clone(),
-            ),
-        )
-        .await?;
-    assert_eq!(applied_edit.is_error, Some(false));
+    assert_eq!(refused_edit.is_error, Some(true));
+    assert_eq!(
+        refused_edit
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/error/code"))
+            .and_then(|value| value.as_str()),
+        Some("RICH_SCHEDULE_UNSUPPORTED")
+    );
     let edited = backend
         .get_scheduled_messages(None, "@alex")
         .await?
         .into_iter()
         .find(|message| message.message_id == 301)
-        .expect("edited scheduled rich message");
-    assert_eq!(edited.text, None);
-    assert_eq!(edited.date, edit_schedule_at_unix);
-    assert!(
-        backend
-            .get_rich_message_snapshot(None, "@alex", 301)
-            .await?
-            .is_some_and(|snapshot| snapshot.block_count > 0)
+        .expect("scheduled message 301 stays untouched");
+    assert_eq!(edited.date, 1_800_000_000);
+    assert_eq!(
+        edited.text.as_deref(),
+        Some("Scheduled fixture follow-up")
     );
 
     client.cancel().await?;

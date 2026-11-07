@@ -60,6 +60,15 @@ and releases use [Semantic Versioning](https://semver.org/).
   five-second busy timeout; it is not a hard whole-process shutdown bound.
 
 ### Fixed
+- Scheduled text with `parse_mode: rich_markdown` is refused with
+  `RICH_SCHEDULE_UNSUPPORTED` before any network call: a scheduled rich
+  message exposes its native blocks but no readable body in the schedule
+  readback, so the desk could neither verify nor repair the post that would
+  publish, and an edit could silently replace it. `html`, `markdown` and
+  `plain` remain supported for scheduled text; rich markdown stays available
+  for immediate sends. Editing a scheduled message that carries no readable
+  text now requires explicit replacement text
+  (`SCHEDULED_MESSAGE_TEXT_UNREADABLE`) instead of writing an empty body.
 - The approval demo no longer turns a slow host into a failure: it waits for the
   approval worker up to a wall-clock deadline instead of a fixed tick count, and
   it retries the state store's `STATE_STORE_ERROR` answers that the store marks

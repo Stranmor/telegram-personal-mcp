@@ -7993,13 +7993,10 @@ impl McpServer {
     ) -> Result<Json<ToolOutcome<PreparedMutation>>, Json<ToolOutcome<PreparedMutation>>> {
         validate_chat_id(&args.chat_id, "prepare_schedule_message")
             .map_err(|error| Json(ToolOutcome::failure(error)))?;
-        match args.parse_mode {
-            CaptionParseMode::RichMarkdown => {
-                validate_rich_markdown(&args.text, "prepare_schedule_message.text")
-            },
-            _ => validate_mutation_text(&args.text, "prepare_schedule_message.text"),
-        }
-        .map_err(|error| Json(ToolOutcome::failure(error)))?;
+        reject_unsupported_schedule_parse_mode(args.parse_mode)
+            .map_err(|error| Json(ToolOutcome::failure(error)))?;
+        validate_mutation_text(&args.text, "prepare_schedule_message.text")
+            .map_err(|error| Json(ToolOutcome::failure(error)))?;
         if args.reply_to_message_id.is_some_and(|message_id| message_id <= 0) {
             return Err(Json(ToolOutcome::failure(ToolFailure::invalid_argument(
                 "prepare_schedule_message.reply_to_message_id must be positive",
@@ -8111,19 +8108,16 @@ impl McpServer {
     ) -> Result<Json<ToolOutcome<PreparedMutation>>, Json<ToolOutcome<PreparedMutation>>> {
         validate_chat_id(&args.chat_id, "prepare_edit_scheduled_message")
             .map_err(|error| Json(ToolOutcome::failure(error)))?;
+        reject_unsupported_schedule_parse_mode(args.parse_mode)
+            .map_err(|error| Json(ToolOutcome::failure(error)))?;
         if args.message_id <= 0 {
             return Err(Json(ToolOutcome::failure(ToolFailure::invalid_argument(
                 "prepare_edit_scheduled_message.message_id must be positive",
             ))));
         }
         if let Some(text) = &args.text {
-            match args.parse_mode {
-                CaptionParseMode::RichMarkdown => {
-                    validate_rich_markdown(text, "prepare_edit_scheduled_message.text")
-                },
-                _ => validate_mutation_text(text, "prepare_edit_scheduled_message.text"),
-            }
-            .map_err(|error| Json(ToolOutcome::failure(error)))?;
+            validate_mutation_text(text, "prepare_edit_scheduled_message.text")
+                .map_err(|error| Json(ToolOutcome::failure(error)))?;
         }
         if args.text.is_none() && args.schedule_at_unix.is_none() && !args.send_when_online {
             return Err(Json(ToolOutcome::failure(ToolFailure::invalid_argument(
@@ -8165,7 +8159,18 @@ impl McpServer {
             "prepare_edit_scheduled_message",
         )
         .map_err(|error| Json(ToolOutcome::failure(error)))?;
-        let text = args.text.unwrap_or_else(|| current.text.clone().unwrap_or_default());
+        let text = match (args.text, current.text.clone()) {
+            (Some(text), _) => text,
+            (None, Some(text)) => text,
+            (None, None) => {
+                return Err(Json(ToolOutcome::failure(ToolFailure::new(
+                    "SCHEDULED_MESSAGE_TEXT_UNREADABLE",
+                    "the scheduled message carries no readable text (native rich scheduling is \
+                     unsupported); pass explicit text with parse_mode html",
+                    false,
+                ))))
+            },
+        };
         if current.text.as_deref().unwrap_or_default() == text && current.date == schedule_date_unix
         {
             return Err(Json(ToolOutcome::failure(ToolFailure::new(
@@ -21128,6 +21133,7 @@ impl McpServer {
                 noforwards,
                 random_id,
             } => {
+                reject_unsupported_schedule_parse_mode(*parse_mode)?;
                 if *schedule_date_unix != SCHEDULE_WHEN_ONLINE_DATE
                     && i64::from(*schedule_date_unix) <= now_unix()
                 {
@@ -21413,6 +21419,7 @@ impl McpServer {
                 parse_mode,
                 schedule_date_unix,
             } => {
+                reject_unsupported_schedule_parse_mode(*parse_mode)?;
                 let scheduled = self
                     .backend
                     .get_scheduled_messages(Some(selected_session.clone()), chat_id)
@@ -35024,6 +35031,20 @@ fn validate_rich_markdown(markdown: &str, field: &str) -> Result<(), ToolFailure
     Ok(())
 }
 
+fn reject_unsupported_schedule_parse_mode(mode: CaptionParseMode) -> Result<(), ToolFailure> {
+    match mode {
+        CaptionParseMode::RichMarkdown => Err(ToolFailure::new(
+            "RICH_SCHEDULE_UNSUPPORTED",
+            "rich_markdown is not supported for scheduled text: the scheduled readback exposes \
+             native rich blocks but no readable body, so the desk cannot verify the post that \
+             will publish. Use parse_mode html for scheduled text; rich_markdown stays available \
+             for immediate sends.",
+            false,
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn validate_operator_rich_html(html: &str, field: &str) -> Result<(), ToolFailure> {
     if html.trim().is_empty() {
         return Err(ToolFailure::invalid_argument(format!("{field} must not be empty")));
@@ -38229,6 +38250,21 @@ fn truncate_preview(text: &mut Option<String>, max_chars: usize) {
 mod tests {
     use super::*;
     use crate::fake::FakeTelegramBackend;
+
+    #[test]
+    fn scheduled_text_rejects_rich_markdown() {
+        // Live defect 2026-10-31: the agent could not tell a scheduled rich body from an empty
+        // one (the readback exposes the rich payload but no readable text), so a public post risked
+        // publishing an unverifiable body. A scheduled text post must have a body the desk can
+        // verify; rich_markdown stays available for immediate sends and is refused up front here.
+        let error = reject_unsupported_schedule_parse_mode(CaptionParseMode::RichMarkdown)
+            .expect_err("rich_markdown must be refused for scheduled text");
+        assert_eq!(error.code, "RICH_SCHEDULE_UNSUPPORTED");
+        for allowed in [CaptionParseMode::Plain, CaptionParseMode::Markdown, CaptionParseMode::Html] {
+            reject_unsupported_schedule_parse_mode(allowed)
+                .expect("plain, md and html stay schedulable");
+        }
+    }
 
     #[test]
     fn mutation_action_label_uses_the_serde_kind_not_the_first_key() {
